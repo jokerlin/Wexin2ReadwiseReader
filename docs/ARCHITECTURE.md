@@ -68,4 +68,4 @@ WeCom -> /api/wx_kf_webhook -> Processor -> WeChat API
 ---
 如需更多上下游协议细节，请参考：
 - [企业微信开放客服回调文档](https://kf.weixin.qq.com/api/doc/path/94745)
-- [Readwise Reader API 文档](https://readwise.io/api_deets)
+- [Readwise Reader API 文档](https://readwise.io/reader_api)
