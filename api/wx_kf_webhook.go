@@ -47,12 +47,14 @@ func decryptMsg(encodingAESKey, corpID, encryptedData string) (string, error) {
     if err != nil {
         return "", fmt.Errorf("invalid AES key: %w", err)
     }
+    fmt.Printf("AES key length: %d\n", len(aesKey))
 
     // Decode encrypted data
     cipherText, err := base64.StdEncoding.DecodeString(encryptedData)
     if err != nil {
         return "", fmt.Errorf("invalid encrypted data: %w", err)
     }
+    fmt.Printf("Cipher text length: %d\n", len(cipherText))
 
     // Create AES cipher
     block, err := aes.NewCipher(aesKey)
@@ -70,11 +72,15 @@ func decryptMsg(encodingAESKey, corpID, encryptedData string) (string, error) {
     plainText := make([]byte, len(cipherText))
     mode.CryptBlocks(plainText, cipherText)
 
+    fmt.Printf("Decrypted length: %d, last bytes: %v\n", len(plainText), plainText[len(plainText)-32:])
+
     // Remove PKCS7 padding
     plainText, err = pkcs7Unpad(plainText)
     if err != nil {
         return "", fmt.Errorf("unpad failed: %w", err)
     }
+
+    fmt.Printf("After unpad length: %d\n", len(plainText))
 
     // Format: random(16) + msgLen(4) + msg + corpID
     if len(plainText) < 20 {
@@ -83,8 +89,10 @@ func decryptMsg(encodingAESKey, corpID, encryptedData string) (string, error) {
 
     // Extract message length
     msgLen := binary.BigEndian.Uint32(plainText[16:20])
+    fmt.Printf("Message length: %d, total plainText: %d\n", msgLen, len(plainText))
+
     if len(plainText) < int(20+msgLen) {
-        return "", fmt.Errorf("invalid message length")
+        return "", fmt.Errorf("invalid message length: need %d, have %d", 20+msgLen, len(plainText))
     }
 
     // Extract message
@@ -92,6 +100,7 @@ func decryptMsg(encodingAESKey, corpID, encryptedData string) (string, error) {
 
     // Verify corpID
     receivedCorpID := string(plainText[20+msgLen:])
+    fmt.Printf("Expected corpID: %s, Received: %s\n", corpID, receivedCorpID)
     if receivedCorpID != corpID {
         return "", fmt.Errorf("corpID mismatch: expected %s, got %s", corpID, receivedCorpID)
     }
@@ -106,8 +115,17 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
         return nil, fmt.Errorf("empty data")
     }
     padding := int(data[length-1])
-    if padding < 1 || padding > aes.BlockSize || padding > length {
-        return nil, fmt.Errorf("invalid padding")
+    if padding < 1 || padding > 32 {
+        return nil, fmt.Errorf("invalid padding: %d", padding)
+    }
+    if padding > length {
+        return nil, fmt.Errorf("padding size larger than data")
+    }
+    // Verify all padding bytes are the same
+    for i := 0; i < padding; i++ {
+        if data[length-1-i] != byte(padding) {
+            return nil, fmt.Errorf("invalid padding bytes")
+        }
     }
     return data[:length-padding], nil
 }
