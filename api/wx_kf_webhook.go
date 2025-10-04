@@ -17,6 +17,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 // EncryptedMsg represents the XML structure of encrypted WeChat messages
@@ -169,7 +170,6 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					fmt.Println("Decryption failed:", err)
 				} else {
-					fmt.Println("Decrypted XML:", decrypted)
 					// Parse decrypted XML to extract token
 					var decryptedMsg struct {
 						Token    string `xml:"Token"`
@@ -177,16 +177,11 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 					}
 					if err := xml.Unmarshal([]byte(decrypted), &decryptedMsg); err != nil {
 						fmt.Println("Failed to parse decrypted XML:", err)
-					} else if decryptedMsg.Token == "" {
-						fmt.Println("No token found in decrypted message")
-					} else {
-						fmt.Printf("Extracted token: %s, openKfId: %s\n", decryptedMsg.Token, decryptedMsg.OpenKfId)
-						// Fetch messages asynchronously
-						go syncKfMessages(corpID, decryptedMsg.Token, decryptedMsg.OpenKfId)
+					} else if decryptedMsg.Token != "" {
+						// Fetch messages synchronously (must complete before function returns)
+						syncKfMessages(corpID, decryptedMsg.Token, decryptedMsg.OpenKfId)
 					}
 				}
-			} else {
-				fmt.Println("Missing WECHAT_ENCODING_AES_KEY or WECHAT_CORPID, cannot decrypt")
 			}
 		}
 
@@ -205,26 +200,20 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 // syncKfMessages fetches messages from WeChat Kefu API using token from webhook
 func syncKfMessages(corpID, token, openKfId string) {
-	fmt.Printf("syncKfMessages called: corpID=%s, token=%s, openKfId=%s\n", corpID, token, openKfId)
-
-	// Get access_token first
 	secret := os.Getenv("WECHAT_KF_SECRET")
 	if secret == "" {
-		fmt.Println("syncKfMessages: missing WECHAT_KF_SECRET")
+		fmt.Println("Error: missing WECHAT_KF_SECRET")
 		return
 	}
 
-	fmt.Println("Getting access_token...")
 	accessToken, _, err := getWeComAccessToken(corpID, secret)
 	if err != nil {
-		fmt.Println("syncKfMessages: failed to get access_token:", err)
+		fmt.Println("Error getting access_token:", err)
 		return
 	}
-	fmt.Println("Got access_token successfully")
 
 	// Call sync_msg API
 	endpoint := "https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=" + accessToken
-
 	reqBody := map[string]interface{}{
 		"token":     token,
 		"limit":     1000,
@@ -232,17 +221,18 @@ func syncKfMessages(corpID, token, openKfId string) {
 	}
 
 	reqJSON, _ := json.Marshal(reqBody)
-	fmt.Printf("Calling sync_msg API with body: %s\n", string(reqJSON))
 
-	resp, err := http.Post(endpoint, "application/json", bytes.NewReader(reqJSON))
+	// Use HTTP client with timeout
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(reqJSON))
 	if err != nil {
-		fmt.Println("syncKfMessages: request failed:", err)
+		fmt.Println("Error calling sync_msg API:", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	fmt.Println("syncKfMessages response:", string(respBody))
+	fmt.Println("Messages:", string(respBody))
 }
 
 // logAccessTokenAsync fetches the enterprise WeCom access_token and prints it.
@@ -273,16 +263,13 @@ func getWeComAccessToken(corpid, secret string) (string, int, error) {
 	v.Set("corpid", corpid)
 	v.Set("corpsecret", secret)
 	u := endpoint + "?" + v.Encode()
-	fmt.Printf("Requesting access_token from: %s\n", u)
 
-	resp, err := http.Get(u)
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(u)
 	if err != nil {
-		fmt.Println("HTTP request error:", err)
 		return "", 0, err
 	}
 	defer resp.Body.Close()
-
-	fmt.Printf("Response status: %d\n", resp.StatusCode)
 
 	var data struct {
 		ErrCode     int    `json:"errcode"`
@@ -291,11 +278,8 @@ func getWeComAccessToken(corpid, secret string) (string, int, error) {
 		ExpiresIn   int    `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		fmt.Println("JSON decode error:", err)
 		return "", 0, err
 	}
-
-	fmt.Printf("API response: errcode=%d, errmsg=%s\n", data.ErrCode, data.ErrMsg)
 
 	if data.ErrCode != 0 {
 		return "", 0, fmt.Errorf("errcode=%d errmsg=%s", data.ErrCode, data.ErrMsg)
