@@ -88,7 +88,8 @@ func (p *Processor) ProcessDecryptedPayload(ctx context.Context, payload []byte)
 		return err
 	}
 
-	for _, msg := range syncResp.MsgList {
+	if len(syncResp.MsgList) > 0 {
+		msg := syncResp.MsgList[len(syncResp.MsgList)-1]
 		if msg.MsgType == "link" && msg.Link.URL != "" {
 			if err := p.readwise.SaveURL(ctx, msg.Link.URL, msg.Link.Title); err != nil {
 				p.logger.Printf("WARN readwise save failed url=%s err=%v", msg.Link.URL, err)
