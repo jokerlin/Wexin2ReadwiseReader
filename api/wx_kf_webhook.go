@@ -169,12 +169,18 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					fmt.Println("Decryption failed:", err)
 				} else {
+					fmt.Println("Decrypted XML:", decrypted)
 					// Parse decrypted XML to extract token
 					var decryptedMsg struct {
 						Token    string `xml:"Token"`
 						OpenKfId string `xml:"OpenKfId"`
 					}
-					if err := xml.Unmarshal([]byte(decrypted), &decryptedMsg); err == nil && decryptedMsg.Token != "" {
+					if err := xml.Unmarshal([]byte(decrypted), &decryptedMsg); err != nil {
+						fmt.Println("Failed to parse decrypted XML:", err)
+					} else if decryptedMsg.Token == "" {
+						fmt.Println("No token found in decrypted message")
+					} else {
+						fmt.Printf("Extracted token: %s, openKfId: %s\n", decryptedMsg.Token, decryptedMsg.OpenKfId)
 						// Fetch messages asynchronously
 						go syncKfMessages(corpID, decryptedMsg.Token, decryptedMsg.OpenKfId)
 					}
@@ -199,6 +205,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 // syncKfMessages fetches messages from WeChat Kefu API using token from webhook
 func syncKfMessages(corpID, token, openKfId string) {
+	fmt.Printf("syncKfMessages called: corpID=%s, token=%s, openKfId=%s\n", corpID, token, openKfId)
+
 	// Get access_token first
 	secret := os.Getenv("WECHAT_KF_SECRET")
 	if secret == "" {
@@ -206,11 +214,13 @@ func syncKfMessages(corpID, token, openKfId string) {
 		return
 	}
 
+	fmt.Println("Getting access_token...")
 	accessToken, _, err := getWeComAccessToken(corpID, secret)
 	if err != nil {
 		fmt.Println("syncKfMessages: failed to get access_token:", err)
 		return
 	}
+	fmt.Println("Got access_token successfully")
 
 	// Call sync_msg API
 	endpoint := "https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=" + accessToken
@@ -222,6 +232,8 @@ func syncKfMessages(corpID, token, openKfId string) {
 	}
 
 	reqJSON, _ := json.Marshal(reqBody)
+	fmt.Printf("Calling sync_msg API with body: %s\n", string(reqJSON))
+
 	resp, err := http.Post(endpoint, "application/json", bytes.NewReader(reqJSON))
 	if err != nil {
 		fmt.Println("syncKfMessages: request failed:", err)
