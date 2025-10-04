@@ -50,10 +50,18 @@ Wexin2ReadwiseReader — Vercel Go Serverless Ping
   - 加密（OpenAPI/企业微信风格）：`msg_signature = sha1(sort(token, timestamp, nonce, encrypt))`
 - `WECHAT_ENCODING_AES_KEY`：可选。开启加密回调时必填（43 字符），用于 AES-256-CBC 解密。
 - `WECHAT_APPID` 或 `WECHAT_CORPID`：可选。用于解密后尾部校验（AppID/CorpID 不匹配会失败）。
+ - `WECHAT_CORPID`：企业ID（用于通过 openapi 获取 access_token）
+ - `WECHAT_KF_SECRET`（或 `WECHAT_CORPSECRET`）：微信客服 Secret（用于获取 access_token）
+ - `READWISE_TOKEN`（或 `READWISE_API_TOKEN`）：Readwise Reader API 的 Token，用于把 URL 推送到 Reader 列表。
 
 示例配置（你提供的参数）
 - `WECHAT_TOKEN=rYi7KLGzsHiTfFXrGpNBpJp`
 - `WECHAT_ENCODING_AES_KEY=Fc8L1eW37a7V3t099twOX1DqHLX2WUwgCGTSUrmY5sN`
+
+如需自动同步消息到 Readwise，请额外设置：
+- `WECHAT_CORPID=你的企业ID`
+- `WECHAT_KF_SECRET=微信客服Secret`
+- `READWISE_TOKEN=你的Readwise Reader API Token`
 
 在 Vercel 设置环境变量：
 - Dashboard → Project → Settings → Environment Variables → 添加上述两项（可在 Preview/Production 均设置）。
@@ -76,6 +84,15 @@ OpenAPI 回调差异（重要）
 - 开放客服 OpenAPI/企业微信风格回调与公众号明文回调不同：
   - GET：使用 `msg_signature`，`echostr` 为加密串，需要解密后回显解密后的明文。
   - POST：请求体为 JSON `{ "encrypt": "..." }`，需要校验 `msg_signature` 并解密再处理；服务端统一返回 `success`。
+
+消息同步与推送到 Readwise
+- 解密后的回调若为 `kf_msg_or_event`，会使用其中的 `Token` 和 `OpenKfId`：
+  1) 通过 `WECHAT_CORPID` + `WECHAT_KF_SECRET` 获取 `access_token`
+  2) 调用 `POST https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=...`
+     传参：`{"token":"<回调Token>", "open_kfid":"<OpenKfId>", "limit":100}`
+  3) 从返回的消息里提取 URL（优先 `link.url`，或文本中正则提取）
+  4) 逐条调用 Readwise Reader API：`POST https://readwise.io/api/v3/save/`，Header `Authorization: Token <READWISE_TOKEN>`，Body `{"url":"..."}`
+  5) 所有外部调用在后台异步执行，Webhook 仍会快速返回 `success`
   - 需要配置：`WECHAT_TOKEN`、`WECHAT_ENCODING_AES_KEY`，以及 `WECHAT_APPID` 或 `WECHAT_CORPID` 用于尾部校验。
 
 生产部署

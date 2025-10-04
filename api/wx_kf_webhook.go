@@ -9,13 +9,17 @@ import (
     "encoding/binary"
     "encoding/hex"
     "encoding/json"
+    "encoding/xml"
     "errors"
     "fmt"
     "io"
     "net/http"
+    "net/url"
     "os"
+    "regexp"
     "sort"
     "strconv"
+    "strings"
     "time"
 )
 
@@ -220,17 +224,38 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "decrypt failed"})
                 return
             }
-
-            // Try parse as JSON, else return text
-            var payload any
-            dec := json.NewDecoder(bytes.NewReader(plain))
-            dec.UseNumber()
-            if err := dec.Decode(&payload); err != nil {
-                payload = map[string]any{"raw": string(plain)}
-            }
-            payload = normalizeCreateTime(payload)
+            // Kick off async downstream handling (sync_msg + Readwise).
+            go handleDecryptedCallback(plain)
 
             // For WeCom callbacks a 200 with body "success" is sufficient and recommended.
+            w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write([]byte("success"))
+            return
+        }
+
+        // Detect encrypted XML payload: <xml><Encrypt>...</Encrypt></xml>
+        type encXML struct {
+            XMLName xml.Name `xml:"xml"`
+            Encrypt string   `xml:"Encrypt"`
+        }
+        var ex encXML
+        if xml.Unmarshal(body, &ex) == nil && ex.Encrypt != "" {
+            // WeCom uses msg_signature over token,timestamp,nonce,encrypt
+            msig := q.Get("msg_signature")
+            if !verifyMsgSignature(token, msig, q.Get("timestamp"), q.Get("nonce"), ex.Encrypt) {
+                w.WriteHeader(http.StatusUnauthorized)
+                _, _ = w.Write([]byte("invalid msg_signature"))
+                return
+            }
+            plain, err := decryptWeChat(ex.Encrypt, encodingAESKey, appID, corpID)
+            if err != nil {
+                w.WriteHeader(http.StatusBadRequest)
+                _, _ = w.Write([]byte("decrypt failed"))
+                return
+            }
+            // Async process and ack
+            go handleDecryptedCallback(plain)
             w.Header().Set("Content-Type", "text/plain; charset=utf-8")
             w.WriteHeader(http.StatusOK)
             _, _ = w.Write([]byte("success"))
@@ -246,13 +271,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
             }
         }
 
-        var payload any
-        dec := json.NewDecoder(bytes.NewReader(body))
-        dec.UseNumber()
-        if err := dec.Decode(&payload); err != nil {
-            payload = map[string]any{"raw": string(body)}
-        }
-        payload = normalizeCreateTime(payload)
+        // Plaintext mode: try to process as XML/JSON; then respond success
+        go handleDecryptedCallback(body)
 
         // Plaintext mode: also respond with the canonical "success"
         w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -294,4 +314,226 @@ func normalizeCreateTime(v any) any {
     default:
         return v
     }
+}
+
+// ===== Downstream processing: sync_msg + Readwise =====
+
+// Minimal XML struct for kf_msg_or_event
+type kfEventXML struct {
+    XMLName     xml.Name `xml:"xml"`
+    ToUserName  string   `xml:"ToUserName"`
+    CreateTime  int64    `xml:"CreateTime"`
+    MsgType     string   `xml:"MsgType"`
+    Event       string   `xml:"Event"`
+    Token       string   `xml:"Token"`
+    OpenKfId    string   `xml:"OpenKfId"`
+}
+
+// handleDecryptedCallback parses the decrypted payload, pulls messages and sends URLs to Readwise.
+func handleDecryptedCallback(plain []byte) {
+    // 1) Try XML first
+    var ev kfEventXML
+    if err := xml.Unmarshal(plain, &ev); err == nil && strings.EqualFold(ev.Event, "kf_msg_or_event") {
+        if ev.Token != "" {
+            go syncAndPushToReadwise(ev.Token, ev.OpenKfId)
+        }
+        return
+    }
+    // 2) Try JSON form
+    var m map[string]any
+    if json.Unmarshal(plain, &m) == nil {
+        if strings.EqualFold(getString(m["Event"]), "kf_msg_or_event") {
+            tok := getString(m["Token"])
+            open := getString(m["OpenKfId"]) // note camel case in docs; JSON may use snake too
+            if tok == "" {
+                tok = getString(m["token"]) // tolerate lower-case
+            }
+            if open == "" {
+                open = getString(m["open_kfid"])
+            }
+            if tok != "" {
+                go syncAndPushToReadwise(tok, open)
+            }
+        }
+    }
+}
+
+func getString(v any) string {
+    switch t := v.(type) {
+    case string:
+        return t
+    case json.Number:
+        return t.String()
+    default:
+        return ""
+    }
+}
+
+// syncAndPushToReadwise fetches access_token, pulls messages, extracts URLs and pushes to Readwise.
+func syncAndPushToReadwise(eventToken, openKfID string) {
+    corpid := os.Getenv("WECHAT_CORPID")
+    if corpid == "" {
+        corpid = os.Getenv("WECHAT_CORP_ID")
+    }
+    secret := os.Getenv("WECHAT_KF_SECRET")
+    if secret == "" {
+        secret = os.Getenv("WECHAT_CORPSECRET")
+    }
+    if corpid == "" || secret == "" {
+        return
+    }
+
+    accessToken, _ := getWeComAccessToken(corpid, secret)
+    if accessToken == "" {
+        return
+    }
+
+    // Pull messages; try up to 1 page to keep fast
+    msgs := syncWeComMessages(accessToken, eventToken, openKfID, 100)
+    if len(msgs) == 0 {
+        return
+    }
+
+    urls := extractURLsFromMessages(msgs)
+    if len(urls) == 0 {
+        return
+    }
+
+    rwToken := os.Getenv("READWISE_TOKEN")
+    if rwToken == "" {
+        rwToken = os.Getenv("READWISE_API_TOKEN")
+    }
+    if rwToken == "" {
+        return
+    }
+    for _, u := range urls {
+        _ = saveToReadwise(rwToken, u)
+    }
+}
+
+func getWeComAccessToken(corpid, secret string) (string, error) {
+    endpoint := "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+    values := url.Values{}
+    values.Set("corpid", corpid)
+    values.Set("corpsecret", secret)
+    reqURL := endpoint + "?" + values.Encode()
+    resp, err := http.Get(reqURL)
+    if err != nil {
+        return "", err
+    }
+    defer resp.Body.Close()
+    var data struct {
+        ErrCode     int    `json:"errcode"`
+        ErrMsg      string `json:"errmsg"`
+        AccessToken string `json:"access_token"`
+        ExpiresIn   int    `json:"expires_in"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+        return "", err
+    }
+    if data.ErrCode != 0 {
+        return "", fmt.Errorf("gettoken err: %d %s", data.ErrCode, data.ErrMsg)
+    }
+    return data.AccessToken, nil
+}
+
+// syncWeComMessages calls kf/sync_msg once.
+func syncWeComMessages(accessToken, eventToken, openKfID string, limit int) []map[string]any {
+    if limit <= 0 || limit > 1000 {
+        limit = 100
+    }
+    endpoint := "https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=" + url.QueryEscape(accessToken)
+    payload := map[string]any{
+        "token":        eventToken,
+        "limit":        limit,
+        "voice_format": 0,
+    }
+    if openKfID != "" {
+        payload["open_kfid"] = openKfID
+    }
+    b, _ := json.Marshal(payload)
+    req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(b))
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return nil
+    }
+    defer resp.Body.Close()
+    var data struct {
+        ErrCode   int                      `json:"errcode"`
+        ErrMsg    string                   `json:"errmsg"`
+        MsgList   []map[string]any         `json:"msg_list"`
+        NextCursor string                  `json:"next_cursor"`
+        HasMore   int                      `json:"has_more"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+        return nil
+    }
+    if data.ErrCode != 0 {
+        return nil
+    }
+    return data.MsgList
+}
+
+var urlRegex = regexp.MustCompile(`https?://[\w\-\.\?\,\'/\\\+&%\$#_=:@]+`)
+
+func extractURLsFromMessages(msgs []map[string]any) []string {
+    var out []string
+    seen := map[string]struct{}{}
+    for _, m := range msgs {
+        // Try link message
+        if getString(m["msgtype"]) == "link" {
+            if link, ok := m["link"].(map[string]any); ok {
+                u := getString(link["url"])
+                if u != "" {
+                    if _, dup := seen[u]; !dup {
+                        seen[u] = struct{}{}
+                        out = append(out, u)
+                    }
+                    continue
+                }
+            }
+        }
+        // Try text content
+        if t, ok := m["text"].(map[string]any); ok {
+            content := getString(t["content"])
+            if content != "" {
+                found := urlRegex.FindAllString(content, -1)
+                for _, u := range found {
+                    if _, dup := seen[u]; !dup {
+                        seen[u] = struct{}{}
+                        out = append(out, u)
+                    }
+                }
+            }
+        }
+    }
+    return out
+}
+
+func saveToReadwise(token, urlStr string) error {
+    api := "https://readwise.io/api/v3/save/"
+    body := map[string]any{
+        "url":          urlStr,
+        "saved_using":  "wecom-kf-webhook",
+        "should_clean_html": false,
+        "category":     "article",
+        "tags":         []string{"wecom", "kf"},
+    }
+    b, _ := json.Marshal(body)
+    req, _ := http.NewRequest(http.MethodPost, api, bytes.NewReader(b))
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Token "+token)
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    // Accept 200 or 201
+    if resp.StatusCode != 200 && resp.StatusCode != 201 {
+        io.Copy(io.Discard, resp.Body)
+        return fmt.Errorf("readwise status %d", resp.StatusCode)
+    }
+    io.Copy(io.Discard, resp.Body)
+    return nil
 }
