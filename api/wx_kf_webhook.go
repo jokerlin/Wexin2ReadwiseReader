@@ -72,6 +72,11 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
     }
     // Trim possible accidental whitespaces when set via dashboard
     encodingAESKey = strings.TrimSpace(encodingAESKey)
+    // Log masked key info for diagnostics
+    func() {
+        h := sha1.Sum([]byte(encodingAESKey))
+        fmt.Println("aes key info:", "b64len:", len(encodingAESKey), "sha1prefix:", hex.EncodeToString(h[:])[:8])
+    }()
     // Prefer RawStdEncoding to avoid padding pitfalls; EncodingAESKey should be 43 chars
     key, err := base64.RawStdEncoding.DecodeString(encodingAESKey)
     if err != nil {
@@ -182,8 +187,14 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
     switch r.Method {
     case http.MethodGet:
+        logAllParams(r, nil)
         if q.Get("diag") == "1" {
             // Safe diagnostics without leaking secrets
+            var aesInfo string
+            if encodingAESKey != "" {
+                h := sha1.Sum([]byte(strings.TrimSpace(encodingAESKey)))
+                aesInfo = hex.EncodeToString(h[:])[:8]
+            }
             info := map[string]any{
                 "ok":                true,
                 "message":           "diag",
@@ -193,6 +204,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 "has_corpid":        corpID != "",
                 "saw_msg_signature": q.Get("msg_signature") != "",
                 "saw_signature":     q.Get("signature") != "",
+                "aes_key_b64len":    len(strings.TrimSpace(encodingAESKey)),
+                "aes_key_sha1_8":    aesInfo,
             }
             _ = json.NewEncoder(w).Encode(info)
             return
@@ -252,6 +265,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
             _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "read body failed"})
             return
         }
+        logAllParams(r, body)
         // Basic request diagnostics (no secrets)
         fmt.Println("POST /wx_kf_webhook", "qs has msg_signature:", q.Get("msg_signature") != "", "len(body):", len(body))
 
@@ -300,7 +314,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 _, _ = w.Write([]byte("invalid msg_signature"))
                 return
             }
-            fmt.Println("encrypted XML payload detected; encrypt len:", len(ex.Encrypt))
+            fmt.Println("encrypted XML payload detected; encrypt len:", len(ex.Encrypt), "ts:", q.Get("timestamp"), "nonce:", q.Get("nonce"))
             plain, err := decryptWeChat(ex.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
                 fmt.Println("decrypt error xml:", err)
@@ -604,4 +618,28 @@ func saveToReadwise(token, urlStr string) error {
     }
     io.Copy(io.Discard, resp.Body)
     return nil
+}
+
+// logAllParams prints all incoming request parameters for diagnostics, including
+// method, path, query, headers and a preview of the body.
+func logAllParams(r *http.Request, body []byte) {
+    preview := ""
+    if len(body) > 0 {
+        if len(body) > 2048 {
+            preview = string(body[:2048]) + "...<truncated>"
+        } else {
+            preview = string(body)
+        }
+    }
+    dump := map[string]any{
+        "method": r.Method,
+        "path":   r.URL.Path,
+        "remote": r.RemoteAddr,
+        "query":  r.URL.Query(),
+        "headers": r.Header,
+        "body_len": len(body),
+        "body":     preview,
+    }
+    b, _ := json.Marshal(dump)
+    fmt.Println("request_dump:", string(b))
 }
