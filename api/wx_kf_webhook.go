@@ -273,11 +273,17 @@ func getWeComAccessToken(corpid, secret string) (string, int, error) {
 	v.Set("corpid", corpid)
 	v.Set("corpsecret", secret)
 	u := endpoint + "?" + v.Encode()
+	fmt.Printf("Requesting access_token from: %s\n", u)
+
 	resp, err := http.Get(u)
 	if err != nil {
+		fmt.Println("HTTP request error:", err)
 		return "", 0, err
 	}
 	defer resp.Body.Close()
+
+	fmt.Printf("Response status: %d\n", resp.StatusCode)
+
 	var data struct {
 		ErrCode     int    `json:"errcode"`
 		ErrMsg      string `json:"errmsg"`
@@ -285,8 +291,12 @@ func getWeComAccessToken(corpid, secret string) (string, int, error) {
 		ExpiresIn   int    `json:"expires_in"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		fmt.Println("JSON decode error:", err)
 		return "", 0, err
 	}
+
+	fmt.Printf("API response: errcode=%d, errmsg=%s\n", data.ErrCode, data.ErrMsg)
+
 	if data.ErrCode != 0 {
 		return "", 0, fmt.Errorf("errcode=%d errmsg=%s", data.ErrCode, data.ErrMsg)
 	}
