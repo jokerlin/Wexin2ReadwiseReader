@@ -249,16 +249,41 @@ func syncKfMessages(corpID, token, openKfId string) {
 	respBody, _ := io.ReadAll(resp.Body)
 	fmt.Println("Messages:", string(respBody))
 
-	// Parse response to get next_cursor
+	// Parse response to get next_cursor and messages
 	var syncResp struct {
 		ErrCode    int    `json:"errcode"`
 		ErrMsg     string `json:"errmsg"`
 		NextCursor string `json:"next_cursor"`
 		HasMore    int    `json:"has_more"`
+		MsgList    []struct {
+			MsgID          string `json:"msgid"`
+			OpenKfID       string `json:"open_kfid"`
+			ExternalUserID string `json:"external_userid"`
+			SendTime       int64  `json:"send_time"`
+			Origin         int    `json:"origin"`
+			MsgType        string `json:"msgtype"`
+			Link           struct {
+				Title  string `json:"title"`
+				Desc   string `json:"desc"`
+				URL    string `json:"url"`
+				PicURL string `json:"pic_url"`
+			} `json:"link"`
+		} `json:"msg_list"`
 	}
 	if err := json.Unmarshal(respBody, &syncResp); err != nil {
 		fmt.Println("Error parsing sync_msg response:", err)
 		return
+	}
+
+	// Filter and send link messages to Readwise Reader
+	for _, msg := range syncResp.MsgList {
+		if msg.MsgType == "link" && msg.Link.URL != "" {
+			if err := addToReadwiseReader(msg.Link.URL, msg.Link.Title); err != nil {
+				fmt.Printf("Error adding link to Readwise Reader: %v\n", err)
+			} else {
+				fmt.Printf("Added to Readwise Reader: %s\n", msg.Link.URL)
+			}
+		}
 	}
 
 	// Save next_cursor to KV if available
@@ -400,5 +425,47 @@ func saveCursorToKV(openKfId, cursor string) error {
 	}
 
 	fmt.Println("Saved cursor to KV:", cursor)
+	return nil
+}
+
+// addToReadwiseReader sends a URL to Readwise Reader
+func addToReadwiseReader(url, title string) error {
+	readwiseToken := os.Getenv("READWISE_TOKEN")
+	if readwiseToken == "" {
+		return fmt.Errorf("missing READWISE_TOKEN environment variable")
+	}
+
+	endpoint := "https://readwise.io/api/v3/save/"
+	reqBody := map[string]interface{}{
+		"url": url,
+	}
+	if title != "" {
+		reqBody["title"] = title
+	}
+
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqJSON))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Token "+readwiseToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Readwise API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
 	return nil
 }
