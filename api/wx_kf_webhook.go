@@ -1,9 +1,14 @@
 package handler
 
 import (
+    "crypto/aes"
+    "crypto/cipher"
     "crypto/sha1"
+    "encoding/base64"
+    "encoding/binary"
     "encoding/hex"
     "encoding/json"
+    "encoding/xml"
     "fmt"
     "io"
     "net/http"
@@ -12,6 +17,14 @@ import (
     "sort"
     "strings"
 )
+
+// EncryptedMsg represents the XML structure of encrypted WeChat messages
+type EncryptedMsg struct {
+    XMLName      xml.Name `xml:"xml"`
+    ToUserName   string   `xml:"ToUserName"`
+    Encrypt      string   `xml:"Encrypt"`
+    AgentID      string   `xml:"AgentID"`
+}
 
 // verifySignature checks plain WeChat signature: sha1(sort(token,timestamp,nonce)).
 // If token is empty, it returns true to ease local testing.
@@ -25,6 +38,78 @@ func verifySignature(token, signature, timestamp, nonce string) bool {
     io.WriteString(h, parts[0]+parts[1]+parts[2])
     calc := hex.EncodeToString(h.Sum(nil))
     return calc == signature
+}
+
+// decryptMsg decrypts WeChat encrypted message using AES-256-CBC
+func decryptMsg(encodingAESKey, corpID, encryptedData string) (string, error) {
+    // Convert base64-encoded AES key to bytes
+    aesKey, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
+    if err != nil {
+        return "", fmt.Errorf("invalid AES key: %w", err)
+    }
+
+    // Decode encrypted data
+    cipherText, err := base64.StdEncoding.DecodeString(encryptedData)
+    if err != nil {
+        return "", fmt.Errorf("invalid encrypted data: %w", err)
+    }
+
+    // Create AES cipher
+    block, err := aes.NewCipher(aesKey)
+    if err != nil {
+        return "", fmt.Errorf("failed to create cipher: %w", err)
+    }
+
+    // Decrypt using CBC mode
+    if len(cipherText) < aes.BlockSize {
+        return "", fmt.Errorf("ciphertext too short")
+    }
+
+    iv := aesKey[:aes.BlockSize]
+    mode := cipher.NewCBCDecrypter(block, iv)
+    plainText := make([]byte, len(cipherText))
+    mode.CryptBlocks(plainText, cipherText)
+
+    // Remove PKCS7 padding
+    plainText, err = pkcs7Unpad(plainText)
+    if err != nil {
+        return "", fmt.Errorf("unpad failed: %w", err)
+    }
+
+    // Format: random(16) + msgLen(4) + msg + corpID
+    if len(plainText) < 20 {
+        return "", fmt.Errorf("decrypted data too short")
+    }
+
+    // Extract message length
+    msgLen := binary.BigEndian.Uint32(plainText[16:20])
+    if len(plainText) < int(20+msgLen) {
+        return "", fmt.Errorf("invalid message length")
+    }
+
+    // Extract message
+    msg := plainText[20 : 20+msgLen]
+
+    // Verify corpID
+    receivedCorpID := string(plainText[20+msgLen:])
+    if receivedCorpID != corpID {
+        return "", fmt.Errorf("corpID mismatch: expected %s, got %s", corpID, receivedCorpID)
+    }
+
+    return string(msg), nil
+}
+
+// pkcs7Unpad removes PKCS7 padding
+func pkcs7Unpad(data []byte) ([]byte, error) {
+    length := len(data)
+    if length == 0 {
+        return nil, fmt.Errorf("empty data")
+    }
+    padding := int(data[length-1])
+    if padding < 1 || padding > aes.BlockSize || padding > length {
+        return nil, fmt.Errorf("invalid padding")
+    }
+    return data[:length-padding], nil
 }
 
 // Handler implements a minimal WeChat Kefu webhook.
@@ -57,16 +142,35 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
     case http.MethodPost:
         body, _ := io.ReadAll(r.Body)
-        // Log body to Vercel logs (truncate to keep logs readable)
-        preview := string(body)
-        if len(preview) > 2048 {
-            preview = preview[:2048] + "...<truncated>"
+
+        // Log original encrypted body
+        fmt.Println("Encrypted body:", string(body))
+
+        // Try to decrypt if it's an encrypted message
+        var encMsg EncryptedMsg
+
+        if err := xml.Unmarshal(body, &encMsg); err == nil && encMsg.Encrypt != "" {
+            // This is an encrypted message
+            encodingAESKey := strings.TrimSpace(os.Getenv("WECHAT_ENCODING_AES_KEY"))
+            corpID := strings.TrimSpace(os.Getenv("WECHAT_CORPID"))
+            if corpID == "" {
+                corpID = strings.TrimSpace(os.Getenv("WECHAT_CORP_ID"))
+            }
+
+            if encodingAESKey != "" && corpID != "" {
+                decrypted, err := decryptMsg(encodingAESKey, corpID, encMsg.Encrypt)
+                if err != nil {
+                    fmt.Println("Decryption failed:", err)
+                } else {
+                    fmt.Println("Decrypted message:", decrypted)
+                }
+            } else {
+                fmt.Println("Missing WECHAT_ENCODING_AES_KEY or WECHAT_CORPID, cannot decrypt")
+            }
+        } else {
+            fmt.Println("Not an encrypted message or XML parse failed")
         }
-        fmt.Println("wx_kf_webhook POST:", "len=", len(body), "preview=", preview)
-        // Also try to fetch and log WeCom access_token if credentials are set
-        go logAccessTokenAsync()
-        // Forward the message body to /api/ping as a best-effort fire-and-forget.
-        go forwardToPing(r, string(body))
+
         // WeChat expects quick ACK; reply with plaintext `success`.
         w.Header().Set("Content-Type", "text/plain; charset=utf-8")
         _, _ = w.Write([]byte("success"))
@@ -117,16 +221,13 @@ func forwardToPing(r *http.Request, msg string) {
 }
 
 // logAccessTokenAsync fetches the enterprise WeCom access_token and prints it.
-// Requires env: WECHAT_CORPID and WECHAT_KF_SECRET (or WECHAT_CORPSECRET).
+// Requires env: WECHAT_CORPID and WECHAT_KF_SECRET.
 func logAccessTokenAsync() {
     corpid := os.Getenv("WECHAT_CORPID")
     if corpid == "" {
         corpid = os.Getenv("WECHAT_CORP_ID")
     }
     secret := os.Getenv("WECHAT_KF_SECRET")
-    if secret == "" {
-        secret = os.Getenv("WECHAT_CORPSECRET")
-    }
     if corpid == "" || secret == "" {
         fmt.Println("gettoken skipped: missing WECHAT_CORPID/WECHAT_KF_SECRET envs")
         return
