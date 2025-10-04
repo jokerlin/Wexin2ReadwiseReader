@@ -49,6 +49,14 @@ func verifyMsgSignature(token, msgSignature, timestamp, nonce, encrypt string) b
     return hex.EncodeToString(h.Sum(nil)) == msgSignature
 }
 
+func computeMsgSignature(token, timestamp, nonce, encrypt string) string {
+    parts := []string{token, timestamp, nonce, encrypt}
+    sort.Strings(parts)
+    h := sha1.New()
+    _, _ = io.WriteString(h, parts[0]+parts[1]+parts[2]+parts[3])
+    return hex.EncodeToString(h.Sum(nil))
+}
+
 func pkcs7Unpad(plain []byte) ([]byte, error) {
     if len(plain) == 0 {
         return nil, errors.New("empty plain")
@@ -90,10 +98,15 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
     if len(key) != 32 {
         return nil, fmt.Errorf("invalid aes key length: %d", len(key))
     }
-    // Cipher sometimes contains newlines; both decoders accept
-    cipherData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Cipher))
+    // Cipher sometimes contains newlines; try Raw then Std decoders
+    b64Cipher = strings.TrimSpace(b64Cipher)
+    cipherData, err := base64.RawStdEncoding.DecodeString(b64Cipher)
     if err != nil {
-        return nil, fmt.Errorf("decode cipher: %w", err)
+        if cd2, err2 := base64.StdEncoding.DecodeString(b64Cipher); err2 == nil {
+            cipherData = cd2
+        } else {
+            return nil, fmt.Errorf("decode cipher: %w / %v", err, err2)
+        }
     }
     if len(cipherData)%aes.BlockSize != 0 {
         // Log useful info for diagnostics
@@ -127,6 +140,23 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
                     err = nil
                 } else {
                     fmt.Println("decrypt fallback also failed:", e2)
+                }
+            }
+        }
+        if err != nil {
+            // Final fallback: try AES-128 with key[:16]
+            if len(key) >= 16 {
+                if block128, e := aes.NewCipher(key[:16]); e == nil {
+                    mode128 := cipher.NewCBCDecrypter(block128, key[:16])
+                    p3 := make([]byte, len(cipherData))
+                    mode128.CryptBlocks(p3, cipherData)
+                    if p3u, e3 := pkcs7Unpad(p3); e3 == nil {
+                        fmt.Println("decrypt fallback with AES-128 succeeded")
+                        plain = p3u
+                        err = nil
+                    } else {
+                        fmt.Println("decrypt AES-128 fallback failed:", e3)
+                    }
                 }
             }
         }
@@ -280,7 +310,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid msg_signature"})
                 return
             }
-            fmt.Println("encrypted JSON payload detected; encrypt len:", len(er.Encrypt))
+            calc := computeMsgSignature(token, q.Get("timestamp"), q.Get("nonce"), er.Encrypt)
+            fmt.Println("encrypted JSON payload detected; encrypt len:", len(er.Encrypt), "msig_prefix:", safePrefix(msig), "calc_prefix:", safePrefix(calc))
             plain, err := decryptWeChat(er.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
                 // Log and still ACK success to avoid repeated retries; but we cannot process downstream.
@@ -314,7 +345,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 _, _ = w.Write([]byte("invalid msg_signature"))
                 return
             }
-            fmt.Println("encrypted XML payload detected; encrypt len:", len(ex.Encrypt), "ts:", q.Get("timestamp"), "nonce:", q.Get("nonce"))
+            calc := computeMsgSignature(token, q.Get("timestamp"), q.Get("nonce"), ex.Encrypt)
+            fmt.Println("encrypted XML payload detected; encrypt len:", len(ex.Encrypt), "ts:", q.Get("timestamp"), "nonce:", q.Get("nonce"), "msig_prefix:", safePrefix(msig), "calc_prefix:", safePrefix(calc))
             plain, err := decryptWeChat(ex.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
                 fmt.Println("decrypt error xml:", err)
@@ -642,4 +674,12 @@ func logAllParams(r *http.Request, body []byte) {
     }
     b, _ := json.Marshal(dump)
     fmt.Println("request_dump:", string(b))
+}
+
+// safePrefix renders only the first 8 chars of a string for logging.
+func safePrefix(s string) string {
+    if len(s) <= 8 {
+        return s
+    }
+    return s[:8]
 }
