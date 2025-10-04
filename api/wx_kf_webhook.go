@@ -90,6 +90,10 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
     if err != nil {
         return nil, fmt.Errorf("decode cipher: %w", err)
     }
+    if len(cipherData)%aes.BlockSize != 0 {
+        // Log useful info for diagnostics
+        fmt.Println("cipher len not block aligned:", len(cipherData))
+    }
     iv := key[:16]
     block, err := aes.NewCipher(key)
     if err != nil {
@@ -103,7 +107,31 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
     mode.CryptBlocks(plain, cipherData)
     plain, err = pkcs7Unpad(plain)
     if err != nil {
-        return nil, fmt.Errorf("unpad: %w", err)
+        // Try a fallback: some producers prefix IV in the first 16 bytes of cipher.
+        // WeChat shouldn't, but try to aid diagnostics.
+        if len(cipherData) > aes.BlockSize {
+            iv2 := cipherData[:aes.BlockSize]
+            rest := cipherData[aes.BlockSize:]
+            if len(rest)%aes.BlockSize == 0 {
+                mode2 := cipher.NewCBCDecrypter(block, iv2)
+                plain2 := make([]byte, len(rest))
+                mode2.CryptBlocks(plain2, rest)
+                if p2, e2 := pkcs7Unpad(plain2); e2 == nil {
+                    fmt.Println("decrypt fallback with IV from cipher succeeded")
+                    plain = p2
+                    err = nil
+                } else {
+                    fmt.Println("decrypt fallback also failed:", e2)
+                }
+            }
+        }
+        if err != nil {
+            // Emit short diagnostics without leaking plaintext
+            if len(plain) >= 1 {
+                fmt.Println("unpad failed; last byte=", int(plain[len(plain)-1]), "plain len=", len(plain))
+            }
+            return nil, fmt.Errorf("unpad: %w", err)
+        }
     }
     if len(plain) < 20 {
         return nil, errors.New("plain too short")
