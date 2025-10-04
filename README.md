@@ -1,104 +1,85 @@
-Wexin2ReadwiseReader — Vercel Go Serverless Ping
+# Weixin2ReadwiseReader
 
-快速添加了一个基于 Vercel Go Runtime 的测试接口：`/api/ping`。
+将企业微信开放客服（WeCom Open KF）的回调消息整理后同步到 Readwise Reader 的 Vercel Go Serverless 项目。该版本在原型的基础上重构了整体架构，强化了安全性、可测试性与可维护性，并补充了完整文档。
 
-如何本地运行（需要 Vercel CLI）：
+## 功能亮点
+- ✅ 支持企业微信客服回调（明文 & 加密），自动完成签名校验与 AES 解密
+- ✅ 将回调中的 Token 与 OpenKfId 自动用于拉取会话消息，并将链接型消息保存至 Readwise Reader
+- ✅ 使用 Upstash KV（Vercel KV）保存同步游标，避免重复处理
+- ✅ 完整的错误处理与 key=value 日志输出，便于排查线上问题
+- ✅ 内部模块化设计，新增针对加解密与签名逻辑的单元测试
 
-1) 安装并登录
-- `npm i -g vercel`
-- `vercel login`
-
-2) 本地开发调试
-- `vercel dev`
-- 浏览器访问 `http://localhost:3000/api/ping`
-
-3) 预览环境部署
-- `vercel`
-- 访问输出的预览 URL（例如 `https://xxx.vercel.app/api/ping`）
-
-4) 生产环境部署
-- `vercel --prod`
-- 访问生产域名：`/api/ping`
-
-接口返回示例：
-
+## 目录结构
 ```
-{
-  "message": "pong",
-  "time": "2025-10-04T03:12:34.567Z",
-  "method": "GET",
-  "path": "/api/ping"
-}
+api/
+  ping/               健康检查路由 `/api/ping`
+  wx_kf_webhook/      微信客服 Webhook `/api/wx_kf_webhook`
+internal/
+  app/                业务编排（KV / WeChat / Readwise 协作）
+  config/             环境变量加载与校验
+  kv/                 Upstash KV 客户端
+  readwise/           Readwise Reader API 客户端
+  wechat/             签名校验、加解密、消息结构体
+  ..._test.go         对核心加解密逻辑的单元测试
 ```
 
-注意事项：
-- Go 版本：当前 `go.mod` 为 `go 1.24.5`。若 Vercel 构建报不支持的 Go 版本，可将其改成 Vercel 支持的稳定版本（如 `1.22`）后重新部署。
-- 函数代码位置：`api/ping.go`（默认路径即成为 `/api/ping` 路由）。
+更多设计细节请见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
+> 当前 `go.mod` 指定 `go 1.20`，与 Vercel Go Runtime 保持兼容；如需使用更高版本特性，请确认 Vercel 已升级对应编译器。
 
-微信客服 Webhook（KF）
+## 环境变量
+| 名称 | 是否必需 | 说明 |
+| ---- | -------- | ---- |
+| `WECHAT_TOKEN` | ✅ | 企业微信客服回调配置的 Token，用于签名校验 |
+| `WECHAT_ENCODING_AES_KEY` | ⚠️ (加密回调必需) | 43 字符的 EncodingAESKey，用于 AES-256-CBC 解密 |
+| `WECHAT_CORPID` / `WECHAT_CORP_ID` / `WECHAT_APPID` | ⚠️ (加密回调推荐) | 企业 ID / AppID，用于解密后尾部校验 |
+| `WECHAT_KF_SECRET` / `WECHAT_CORPSECRET` | ⚠️ (同步消息必需) | 开放客服 Secret，用于换取 access_token |
+| `READWISE_TOKEN` / `READWISE_API_TOKEN` | ✅ (同步到 Reader) | Readwise Reader API Token，用于保存链接 |
+| `KV_REST_API_URL` | 可选 | Vercel KV REST Endpoint（例如 `https://xxx.upstash.io`） |
+| `KV_REST_API_TOKEN` | 可选 | Vercel KV REST Token |
+| `HTTP_TIMEOUT` | 可选 | 对外 HTTP 请求超时时间（默认 `5s`） |
+| `KV_HTTP_TIMEOUT` | 可选 | KV 请求超时时间（默认 `3s`） |
 
-- 路由：`/api/wx_kf_webhook`
-- 文件：`api/wx_kf_webhook.go`
-- 功能：
-  - GET：用于 URL 校验，企业微信/开放客服会带 `msg_signature`，服务端需解密 `echostr` 并按原样以 `text/plain` 返回。
-  - POST：收到回调（加密或明文）后，校验并解密（如有），返回 `success`（`text/plain`）。
+> **提示**：若缺少 KV 配置，系统仍可运行但不会保存游标；缺少 Readwise Token 时将无法推送链接，会返回错误以触发重试。
 
-环境变量
-- `WECHAT_TOKEN`：用于签名校验
-  - 明文：`signature = sha1(sort(token, timestamp, nonce))`
-  - 加密（OpenAPI/企业微信风格）：`msg_signature = sha1(sort(token, timestamp, nonce, encrypt))`
-- `WECHAT_ENCODING_AES_KEY`：可选。开启加密回调时必填（43 字符），用于 AES-256-CBC 解密。
-- `WECHAT_APPID` 或 `WECHAT_CORPID`：可选。用于解密后尾部校验（AppID/CorpID 不匹配会失败）。
- - `WECHAT_CORPID`：企业ID（用于通过 openapi 获取 access_token）
- - `WECHAT_KF_SECRET`（或 `WECHAT_CORPSECRET`）：微信客服 Secret（用于获取 access_token）
- - `READWISE_TOKEN`（或 `READWISE_API_TOKEN`）：Readwise Reader API 的 Token，用于把 URL 推送到 Reader 列表。
+## 本地运行
+1. 安装并登录 Vercel CLI
+   ```bash
+   npm i -g vercel
+   vercel login
+   ```
+2. 准备环境变量（示例 `.env.local`）
+   ```bash
+   WECHAT_TOKEN=xxx
+   WECHAT_ENCODING_AES_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+   WECHAT_CORPID=wwxxxx
+   WECHAT_KF_SECRET=xxxxxxxx
+   READWISE_TOKEN=rw_xxxxx
+   ```
+3. 启动本地开发
+   ```bash
+   vercel dev
+   ```
+   - 健康检查：`http://localhost:3000/api/ping`
+   - Webhook：`http://localhost:3000/api/wx_kf_webhook`
 
-示例配置（你提供的参数）
-- `WECHAT_TOKEN=rYi7KLGzsHiTfFXrGpNBpJp`
-- `WECHAT_ENCODING_AES_KEY=Fc8L1eW37a7V3t099twOX1DqHLX2WUwgCGTSUrmY5sN`
+如需直接运行单元测试，可在仓库根目录执行：
+```bash
+GOCACHE=$(pwd)/.cache/go-build go test ./...
+```
+（沙箱环境可能无法写入全局 Go build cache，因此示例中指定了本地缓存路径。）
 
-如需自动同步消息到 Readwise，请额外设置：
-- `WECHAT_CORPID=你的企业ID`
-- `WECHAT_KF_SECRET=微信客服Secret`
-- `READWISE_TOKEN=你的Readwise Reader API Token`
+## 部署
+```bash
+vercel            # 预览环境
+vercel --prod     # 生产环境
+```
+确保在 Vercel 项目的 Environment Variables 中配置上述所有必需参数。
 
-在 Vercel 设置环境变量：
-- Dashboard → Project → Settings → Environment Variables → 添加上述两项（可在 Preview/Production 均设置）。
-- 本地 `vercel dev` 时可在根目录创建 `.env.local`：
-  ```
-  WECHAT_TOKEN=rYi7KLGzsHiTfFXrGpNBpJp
-  WECHAT_ENCODING_AES_KEY=Fc8L1eW37a7V3t099twOX1DqHLX2WUwgCGTSUrmY5sN
-  ```
+## 故障排查
+- Webhook 返回 401：核对 `WECHAT_TOKEN`、timestamp/nonce 是否按原样传入。
+- Webhook 返回 500：通常表示 AES Key 或 Readwise/WeChat 凭证缺失，详见 Vercel 日志中的结构化错误信息。
+- 未保存游标：检查 KV URL/Token 是否配置；若无需增量同步可留空。
 
-本地调试
-- `vercel dev`
-- GET 校验示例：
-  - `curl "http://localhost:3000/api/wx_kf_webhook?signature=xxx&timestamp=111&nonce=222&echostr=hello"`
-- POST 消息示例（明文 JSON）：
-  - `curl -X POST -H "Content-Type: application/json" \
-    -d '{"event":"user_enter_session","create_time": 1696400000, "open_kfid":"xxx"}' \
-    http://localhost:3000/api/wx_kf_webhook`
-
-OpenAPI 回调差异（重要）
-- 开放客服 OpenAPI/企业微信风格回调与公众号明文回调不同：
-  - GET：使用 `msg_signature`，`echostr` 为加密串，需要解密后回显解密后的明文。
-  - POST：请求体为 JSON `{ "encrypt": "..." }`，需要校验 `msg_signature` 并解密再处理；服务端统一返回 `success`。
-
-消息同步与推送到 Readwise
-- 解密后的回调若为 `kf_msg_or_event`，会使用其中的 `Token` 和 `OpenKfId`：
-  1) 通过 `WECHAT_CORPID` + `WECHAT_KF_SECRET` 获取 `access_token`
-  2) 调用 `POST https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=...`
-     传参：`{"token":"<回调Token>", "open_kfid":"<OpenKfId>", "limit":100}`
-  3) 从返回的消息里提取 URL（优先 `link.url`，或文本中正则提取）
-  4) 逐条调用 Readwise Reader API：`POST https://readwise.io/api/v3/save/`，Header `Authorization: Token <READWISE_TOKEN>`，Body `{"url":"..."}`
-  5) 所有外部调用在后台异步执行，Webhook 仍会快速返回 `success`
-  - 需要配置：`WECHAT_TOKEN`、`WECHAT_ENCODING_AES_KEY`，以及 `WECHAT_APPID` 或 `WECHAT_CORPID` 用于尾部校验。
-
-生产部署
-- 预览：`vercel`
-- 生产：`vercel --prod`
-
-说明
-- 文档参考（需登录/访问）：微信客服回调（kf）：https://kf.weixin.qq.com/api/doc/path/94745
-- 已同时支持明文与加密（`msg_signature` + AES）两种回调模式。若你的后台开启的是 OpenAPI 加密回调，请务必配置 AES Key 与 AppID/CorpID。
+## 许可证
+项目继续沿用原仓库的 [MIT License](LICENSE)。

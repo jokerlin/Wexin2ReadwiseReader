@@ -62,3 +62,6 @@ Temporary Items
 
 # Log files
 server.log
+
+# cache
+.cache/
