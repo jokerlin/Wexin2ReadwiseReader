@@ -1,25 +1,26 @@
-package api
+package handler
 
 import (
-	"encoding/json"
-	"net/http"
+    "encoding/json"
+    "net/http"
+    "time"
 )
 
-// PingHandler 处理 ping 请求，用于健康检查
-// 为了让 Vercel 正确识别，我们需要导出 Handler 函数
-var Handler = PingHandler
+// Handler is the entrypoint for Vercel Go serverless functions.
+// It responds with a simple JSON payload for health checks.
+func Handler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-func PingHandler(w http.ResponseWriter, r *http.Request) {
-	// 设置响应头
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+    // Basic no-cache to avoid stale responses during testing
+    w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
 
-	// 构造响应数据
-	response := map[string]string{
-		"message": "pong",
-		"status":  "ok",
-	}
+    resp := map[string]any{
+        "message": "pong",
+        "time":    time.Now().UTC().Format(time.RFC3339Nano),
+        "method":  r.Method,
+        "path":    r.URL.Path,
+    }
 
-	// 编码并返回 JSON
-	json.NewEncoder(w).Encode(response)
+    _ = json.NewEncoder(w).Encode(resp)
 }
+

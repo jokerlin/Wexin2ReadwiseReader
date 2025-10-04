@@ -1,155 +1,65 @@
-# Wexin2ReadwiseReader
-微信转发文章到 Readwise Reader
+Wexin2ReadwiseReader — Vercel Go Serverless Ping
 
-## 项目结构
+快速添加了一个基于 Vercel Go Runtime 的测试接口：`/api/ping`。
+
+如何本地运行（需要 Vercel CLI）：
+
+1) 安装并登录
+- `npm i -g vercel`
+- `vercel login`
+
+2) 本地开发调试
+- `vercel dev`
+- 浏览器访问 `http://localhost:3000/api/ping`
+
+3) 预览环境部署
+- `vercel`
+- 访问输出的预览 URL（例如 `https://xxx.vercel.app/api/ping`）
+
+4) 生产环境部署
+- `vercel --prod`
+- 访问生产域名：`/api/ping`
+
+接口返回示例：
 
 ```
-.
-├── api/
-│   ├── index.go         # API 首页 - /api/
-│   └── ping.go          # 健康检查 - /api/ping
-├── handler/
-│   └── ping.go          # 本地开发用的处理器（可选）
-├── vercel.json          # Vercel 配置文件
-├── go.mod               # Go 模块依赖
-└── go.sum               # 依赖版本锁定
-```
-
-## 功能特性
-
-- ✅ 使用 Vercel Serverless Functions 部署
-- ✅ 提供 `/api/ping` 健康检查接口
-- ✅ 提供 `/api/` API 信息接口
-- ✅ 支持本地开发和 Vercel 部署
-
-## 快速开始
-
-### 安装依赖
-
-```bash
-# 安装 Go 依赖
-go mod tidy
-
-# 安装 Vercel CLI（如果还没有安装）
-npm i -g vercel
-```
-
-### 本地开发
-
-使用 Vercel CLI 在本地运行：
-
-```bash
-vercel dev
-```
-
-服务将在 `http://localhost:3000` 启动
-
-### 测试接口
-
-```bash
-# 测试 ping 接口
-curl http://localhost:3000/api/ping
-
-# 测试首页接口
-curl http://localhost:3000/api/
-```
-
-预期响应：
-
-**GET /api/ping**
-```json
 {
   "message": "pong",
-  "status": "ok"
+  "time": "2025-10-04T03:12:34.567Z",
+  "method": "GET",
+  "path": "/api/ping"
 }
 ```
 
-**GET /api/**
-```json
-{
-  "name": "Wexin2ReadwiseReader API",
-  "version": "1.0.0",
-  "status": "running",
-  "endpoints": [
-    "/api/ping - 健康检查"
-  ]
-}
-```
+注意事项：
+- Go 版本：当前 `go.mod` 为 `go 1.24.5`。若 Vercel 构建报不支持的 Go 版本，可将其改成 Vercel 支持的稳定版本（如 `1.22`）后重新部署。
+- 函数代码位置：`api/ping.go`（默认路径即成为 `/api/ping` 路由）。
 
-## 部署到 Vercel
 
-### 首次部署
+微信客服 Webhook（KF）
 
-```bash
-vercel
-```
+- 路由：`/api/wx_kf_webhook`
+- 文件：`api/wx_kf_webhook.go`
+- 功能：
+  - GET：用于 URL 校验，返回 `echostr`（如配置了 `WECHAT_TOKEN` 会校验 `signature`）。
+  - POST：接收微信客服的事件/消息（JSON 明文模式），将消息原样返回，并将 `create_time` 额外格式化为 `create_time_rfc3339`。
 
-### 生产部署
+环境变量
+- `WECHAT_TOKEN`：可选。用于签名校验（`signature` = sha1(sort(token, timestamp, nonce))）。未设置时，本地开发会跳过校验。
 
-```bash
-vercel --prod
-```
+本地调试
+- `vercel dev`
+- GET 校验示例：
+  - `curl "http://localhost:3000/api/wx_kf_webhook?signature=xxx&timestamp=111&nonce=222&echostr=hello"`
+- POST 消息示例（明文 JSON）：
+  - `curl -X POST -H "Content-Type: application/json" \
+    -d '{"event":"user_enter_session","create_time": 1696400000, "open_kfid":"xxx"}' \
+    http://localhost:3000/api/wx_kf_webhook`
 
-部署后，你的 API 将在 `https://your-project.vercel.app/api/` 可用
+生产部署
+- 预览：`vercel`
+- 生产：`vercel --prod`
 
-## 开发说明
-
-### 添加新的 Serverless Function
-
-在 `api/` 目录下创建新的 `.go` 文件，每个文件会自动成为一个独立的 API 端点：
-
-```go
-// api/hello.go
-package api
-
-import (
-    "encoding/json"
-    "net/http"
-)
-
-func Hello(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    
-    response := map[string]string{
-        "message": "Hello World",
-    }
-    
-    json.NewEncoder(w).Encode(response)
-}
-```
-
-这将创建一个新的端点：`/api/hello`
-
-### 函数命名规则
-
-- 文件名决定 URL 路径：`api/ping.go` → `/api/ping`
-- 函数名必须是导出的（首字母大写）
-- 函数签名：`func FunctionName(w http.ResponseWriter, r *http.Request)`
-
-## Vercel 配置
-
-项目使用 `vercel.json` 进行配置：
-
-```json
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/**/*.go",
-      "use": "@vercel/go"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/$1"
-    }
-  ]
-}
-```
-
-## 参考文档
-
-- [Vercel Go Runtime](https://vercel.com/docs/functions/runtimes/go)
-- [Vercel Serverless Functions](https://vercel.com/docs/functions)
+说明
+- 文档参考（需登录/访问）：微信客服回调（kf）：https://kf.weixin.qq.com/api/doc/path/94745
+- 若开启安全模式（AES 加密、`msg_signature`），需按文档进行消息解密与签名校验。本实现仅覆盖明文/简单签名场景，方便快速联通调试。
