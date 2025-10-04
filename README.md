@@ -5,45 +5,58 @@
 
 ```
 .
-├── main.go              # 主入口文件
 ├── api/
-│   └── entrypoint.go    # API 服务启动和路由配置
+│   ├── index.go         # API 首页 - /api/
+│   └── ping.go          # 健康检查 - /api/ping
 ├── handler/
-│   └── ping.go          # Ping 处理器
+│   └── ping.go          # 本地开发用的处理器（可选）
+├── vercel.json          # Vercel 配置文件
 ├── go.mod               # Go 模块依赖
 └── go.sum               # 依赖版本锁定
 ```
 
 ## 功能特性
 
-- ✅ 使用 Gin 框架构建 HTTP 服务
-- ✅ 提供 `/ping` 健康检查接口
-- ✅ 默认监听 8080 端口
+- ✅ 使用 Vercel Serverless Functions 部署
+- ✅ 提供 `/api/ping` 健康检查接口
+- ✅ 提供 `/api/` API 信息接口
+- ✅ 支持本地开发和 Vercel 部署
 
 ## 快速开始
 
 ### 安装依赖
 
 ```bash
+# 安装 Go 依赖
 go mod tidy
+
+# 安装 Vercel CLI（如果还没有安装）
+npm i -g vercel
 ```
 
-### 启动服务
+### 本地开发
+
+使用 Vercel CLI 在本地运行：
 
 ```bash
-go run main.go
+vercel dev
 ```
 
-服务将在 `http://localhost:8080` 启动
+服务将在 `http://localhost:3000` 启动
 
 ### 测试接口
 
 ```bash
-curl http://localhost:8080/ping
+# 测试 ping 接口
+curl http://localhost:3000/api/ping
+
+# 测试首页接口
+curl http://localhost:3000/api/
 ```
 
 预期响应：
 
+**GET /api/ping**
 ```json
 {
   "message": "pong",
@@ -51,65 +64,92 @@ curl http://localhost:8080/ping
 }
 ```
 
-## API 接口
-
-### GET /ping
-
-健康检查接口
-
-**响应示例：**
-
+**GET /api/**
 ```json
 {
-  "message": "pong",
-  "status": "ok"
+  "name": "Wexin2ReadwiseReader API",
+  "version": "1.0.0",
+  "status": "running",
+  "endpoints": [
+    "/api/ping - 健康检查"
+  ]
 }
 ```
+
+## 部署到 Vercel
+
+### 首次部署
+
+```bash
+vercel
+```
+
+### 生产部署
+
+```bash
+vercel --prod
+```
+
+部署后，你的 API 将在 `https://your-project.vercel.app/api/` 可用
 
 ## 开发说明
 
-### 添加新的路由
+### 添加新的 Serverless Function
 
-在 `api/entrypoint.go` 的 `RegisterRoutes` 函数中添加新路由：
-
-```go
-func RegisterRoutes(r *gin.Engine) {
-    r.GET("/ping", handler.Ping)
-    // 添加新路由
-    r.GET("/your-route", handler.YourHandler)
-}
-```
-
-### 创建新的处理器
-
-在 `handler/` 目录下创建新的处理器文件：
+在 `api/` 目录下创建新的 `.go` 文件，每个文件会自动成为一个独立的 API 端点：
 
 ```go
-package handler
+// api/hello.go
+package api
 
 import (
+    "encoding/json"
     "net/http"
-    "github.com/gin-gonic/gin"
 )
 
-func YourHandler(c *gin.Context) {
-    c.JSON(http.StatusOK, gin.H{
-        "message": "your response",
-    })
+func Hello(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    
+    response := map[string]string{
+        "message": "Hello World",
+    }
+    
+    json.NewEncoder(w).Encode(response)
 }
 ```
 
-## 生产部署
+这将创建一个新的端点：`/api/hello`
 
-在生产环境中，建议设置 Gin 为 release 模式：
+### 函数命名规则
 
-```bash
-export GIN_MODE=release
-go run main.go
+- 文件名决定 URL 路径：`api/ping.go` → `/api/ping`
+- 函数名必须是导出的（首字母大写）
+- 函数签名：`func FunctionName(w http.ResponseWriter, r *http.Request)`
+
+## Vercel 配置
+
+项目使用 `vercel.json` 进行配置：
+
+```json
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/**/*.go",
+      "use": "@vercel/go"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ]
+}
 ```
 
-或者在代码中设置：
+## 参考文档
 
-```go
-gin.SetMode(gin.ReleaseMode)
-```
+- [Vercel Go Runtime](https://vercel.com/docs/functions/runtimes/go)
+- [Vercel Serverless Functions](https://vercel.com/docs/functions)
