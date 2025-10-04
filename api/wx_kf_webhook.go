@@ -70,14 +70,23 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
     if encodingAESKey == "" {
         return nil, errors.New("missing encoding aes key")
     }
-    key, err := base64.StdEncoding.DecodeString(encodingAESKey + "=")
+    // Trim possible accidental whitespaces when set via dashboard
+    encodingAESKey = strings.TrimSpace(encodingAESKey)
+    // Prefer RawStdEncoding to avoid padding pitfalls; EncodingAESKey should be 43 chars
+    key, err := base64.RawStdEncoding.DecodeString(encodingAESKey)
     if err != nil {
-        return nil, fmt.Errorf("decode aes key: %w", err)
+        // Fallback to StdEncoding with '=' in case env contains 43 chars but decoder differs
+        key2, err2 := base64.StdEncoding.DecodeString(encodingAESKey + "=")
+        if err2 != nil {
+            return nil, fmt.Errorf("decode aes key: %w / %v", err, err2)
+        }
+        key = key2
     }
     if len(key) != 32 {
         return nil, fmt.Errorf("invalid aes key length: %d", len(key))
     }
-    cipherData, err := base64.StdEncoding.DecodeString(b64Cipher)
+    // Cipher sometimes contains newlines; both decoders accept
+    cipherData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64Cipher))
     if err != nil {
         return nil, fmt.Errorf("decode cipher: %w", err)
     }
@@ -215,6 +224,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
             _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "read body failed"})
             return
         }
+        // Basic request diagnostics (no secrets)
+        fmt.Println("POST /wx_kf_webhook", "qs has msg_signature:", q.Get("msg_signature") != "", "len(body):", len(body))
 
         // Detect encrypted OpenAPI payload {"encrypt":"..."}
         type encReq struct{ Encrypt string `json:"encrypt"` }
@@ -227,6 +238,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid msg_signature"})
                 return
             }
+            fmt.Println("encrypted JSON payload detected; encrypt len:", len(er.Encrypt))
             plain, err := decryptWeChat(er.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
                 // Log and still ACK success to avoid repeated retries; but we cannot process downstream.
@@ -260,6 +272,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
                 _, _ = w.Write([]byte("invalid msg_signature"))
                 return
             }
+            fmt.Println("encrypted XML payload detected; encrypt len:", len(ex.Encrypt))
             plain, err := decryptWeChat(ex.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
                 fmt.Println("decrypt error xml:", err)
@@ -345,9 +358,11 @@ type kfEventXML struct {
 
 // handleDecryptedCallback parses the decrypted payload, pulls messages and sends URLs to Readwise.
 func handleDecryptedCallback(plain []byte) {
+    fmt.Println("handling decrypted callback; bytes:", len(plain))
     // 1) Try XML first
     var ev kfEventXML
     if err := xml.Unmarshal(plain, &ev); err == nil && strings.EqualFold(ev.Event, "kf_msg_or_event") {
+        fmt.Println("parsed XML event; open_kfid:", ev.OpenKfId != "", "has token:", ev.Token != "")
         if ev.Token != "" {
             go syncAndPushToReadwise(ev.Token, ev.OpenKfId)
         }
@@ -365,6 +380,7 @@ func handleDecryptedCallback(plain []byte) {
             if open == "" {
                 open = getString(m["open_kfid"])
             }
+            fmt.Println("parsed JSON event; open_kfid:", open != "", "has token:", tok != "")
             if tok != "" {
                 go syncAndPushToReadwise(tok, open)
             }
@@ -394,22 +410,26 @@ func syncAndPushToReadwise(eventToken, openKfID string) {
         secret = os.Getenv("WECHAT_CORPSECRET")
     }
     if corpid == "" || secret == "" {
+        fmt.Println("skip sync: missing corpid/secret")
         return
     }
 
     accessToken, _ := getWeComAccessToken(corpid, secret)
     if accessToken == "" {
+        fmt.Println("gettoken failed")
         return
     }
 
     // Pull messages; try up to 1 page to keep fast
     msgs := syncWeComMessages(accessToken, eventToken, openKfID, 100)
     if len(msgs) == 0 {
+        fmt.Println("sync_msg returned 0 messages")
         return
     }
 
     urls := extractURLsFromMessages(msgs)
     if len(urls) == 0 {
+        fmt.Println("no url extracted from messages")
         return
     }
 
@@ -418,10 +438,15 @@ func syncAndPushToReadwise(eventToken, openKfID string) {
         rwToken = os.Getenv("READWISE_API_TOKEN")
     }
     if rwToken == "" {
+        fmt.Println("missing READWISE token; skip push")
         return
     }
     for _, u := range urls {
-        _ = saveToReadwise(rwToken, u)
+        if err := saveToReadwise(rwToken, u); err != nil {
+            fmt.Println("readwise save error:", err)
+        } else {
+            fmt.Println("readwise saved:", u)
+        }
     }
 }
 
@@ -484,6 +509,7 @@ func syncWeComMessages(accessToken, eventToken, openKfID string, limit int) []ma
         return nil
     }
     if data.ErrCode != 0 {
+        fmt.Println("sync_msg err:", data.ErrCode, data.ErrMsg)
         return nil
     }
     return data.MsgList
