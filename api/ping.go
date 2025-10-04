@@ -5,8 +5,11 @@ import (
 	"net/http"
 )
 
-// Ping 处理 ping 请求，用于健康检查
-func Ping(w http.ResponseWriter, r *http.Request) {
+// PingHandler 处理 ping 请求，用于健康检查
+// 为了让 Vercel 正确识别，我们需要导出 Handler 函数
+var Handler = PingHandler
+
+func PingHandler(w http.ResponseWriter, r *http.Request) {
 	// 设置响应头
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

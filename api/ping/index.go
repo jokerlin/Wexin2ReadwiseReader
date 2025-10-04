@@ -5,20 +5,16 @@ import (
 	"net/http"
 )
 
-// Handler 处理根路径请求
+// Handler 处理 ping 请求，用于健康检查
 func Handler(w http.ResponseWriter, r *http.Request) {
 	// 设置响应头
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
 	// 构造响应数据
-	response := map[string]interface{}{
-		"name":    "Wexin2ReadwiseReader API",
-		"version": "1.0.0",
-		"status":  "running",
-		"endpoints": []string{
-			"/api/ping - 健康检查",
-		},
+	response := map[string]string{
+		"message": "pong",
+		"status":  "ok",
 	}
 
 	// 编码并返回 JSON
