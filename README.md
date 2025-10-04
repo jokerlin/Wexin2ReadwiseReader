@@ -41,11 +41,27 @@ Wexin2ReadwiseReader — Vercel Go Serverless Ping
 - 路由：`/api/wx_kf_webhook`
 - 文件：`api/wx_kf_webhook.go`
 - 功能：
-  - GET：用于 URL 校验，返回 `echostr`（如配置了 `WECHAT_TOKEN` 会校验 `signature`）。
-  - POST：接收微信客服的事件/消息（JSON 明文模式），将消息原样返回，并将 `create_time` 额外格式化为 `create_time_rfc3339`。
+  - GET：用于 URL 校验，企业微信/开放客服会带 `msg_signature`，服务端需解密 `echostr` 并按原样以 `text/plain` 返回。
+  - POST：收到回调（加密或明文）后，校验并解密（如有），返回 `success`（`text/plain`）。
 
 环境变量
-- `WECHAT_TOKEN`：可选。用于签名校验（`signature` = sha1(sort(token, timestamp, nonce))）。未设置时，本地开发会跳过校验。
+- `WECHAT_TOKEN`：用于签名校验
+  - 明文：`signature = sha1(sort(token, timestamp, nonce))`
+  - 加密（OpenAPI/企业微信风格）：`msg_signature = sha1(sort(token, timestamp, nonce, encrypt))`
+- `WECHAT_ENCODING_AES_KEY`：可选。开启加密回调时必填（43 字符），用于 AES-256-CBC 解密。
+- `WECHAT_APPID` 或 `WECHAT_CORPID`：可选。用于解密后尾部校验（AppID/CorpID 不匹配会失败）。
+
+示例配置（你提供的参数）
+- `WECHAT_TOKEN=rYi7KLGzsHiTfFXrGpNBpJp`
+- `WECHAT_ENCODING_AES_KEY=Fc8L1eW37a7V3t099twOX1DqHLX2WUwgCGTSUrmY5sN`
+
+在 Vercel 设置环境变量：
+- Dashboard → Project → Settings → Environment Variables → 添加上述两项（可在 Preview/Production 均设置）。
+- 本地 `vercel dev` 时可在根目录创建 `.env.local`：
+  ```
+  WECHAT_TOKEN=rYi7KLGzsHiTfFXrGpNBpJp
+  WECHAT_ENCODING_AES_KEY=Fc8L1eW37a7V3t099twOX1DqHLX2WUwgCGTSUrmY5sN
+  ```
 
 本地调试
 - `vercel dev`
@@ -56,10 +72,16 @@ Wexin2ReadwiseReader — Vercel Go Serverless Ping
     -d '{"event":"user_enter_session","create_time": 1696400000, "open_kfid":"xxx"}' \
     http://localhost:3000/api/wx_kf_webhook`
 
+OpenAPI 回调差异（重要）
+- 开放客服 OpenAPI/企业微信风格回调与公众号明文回调不同：
+  - GET：使用 `msg_signature`，`echostr` 为加密串，需要解密后回显解密后的明文。
+  - POST：请求体为 JSON `{ "encrypt": "..." }`，需要校验 `msg_signature` 并解密再处理；服务端统一返回 `success`。
+  - 需要配置：`WECHAT_TOKEN`、`WECHAT_ENCODING_AES_KEY`，以及 `WECHAT_APPID` 或 `WECHAT_CORPID` 用于尾部校验。
+
 生产部署
 - 预览：`vercel`
 - 生产：`vercel --prod`
 
 说明
 - 文档参考（需登录/访问）：微信客服回调（kf）：https://kf.weixin.qq.com/api/doc/path/94745
-- 若开启安全模式（AES 加密、`msg_signature`），需按文档进行消息解密与签名校验。本实现仅覆盖明文/简单签名场景，方便快速联通调试。
+- 已同时支持明文与加密（`msg_signature` + AES）两种回调模式。若你的后台开启的是 OpenAPI 加密回调，请务必配置 AES Key 与 AppID/CorpID。
