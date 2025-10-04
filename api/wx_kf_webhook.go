@@ -110,11 +110,20 @@ func decryptWeChat(b64Cipher, encodingAESKey, wantAppID, wantCorpID string) ([]b
     }
     msg := content[4 : 4+msgLen]
     appID := string(content[4+msgLen:])
-    if wantAppID != "" && appID != wantAppID {
-        return nil, fmt.Errorf("appid mismatch: got %s", appID)
-    }
-    if wantCorpID != "" && appID != wantCorpID {
-        return nil, fmt.Errorf("corpid mismatch: got %s", appID)
+    // Accept either AppID or CorpID when both are provided; check only provided ones
+    if wantAppID == "" && wantCorpID == "" {
+        // no check
+    } else {
+        ok := false
+        if wantAppID != "" && appID == wantAppID {
+            ok = true
+        }
+        if wantCorpID != "" && appID == wantCorpID {
+            ok = true
+        }
+        if !ok {
+            return nil, fmt.Errorf("id mismatch: got %s", appID)
+        }
     }
     return msg, nil
 }
@@ -220,8 +229,11 @@ func Handler(w http.ResponseWriter, r *http.Request) {
             }
             plain, err := decryptWeChat(er.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
-                w.WriteHeader(http.StatusBadRequest)
-                _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "decrypt failed"})
+                // Log and still ACK success to avoid repeated retries; but we cannot process downstream.
+                fmt.Println("decrypt error json:", err)
+                w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+                w.WriteHeader(http.StatusOK)
+                _, _ = w.Write([]byte("success"))
                 return
             }
             // Kick off async downstream handling (sync_msg + Readwise).
@@ -250,8 +262,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
             }
             plain, err := decryptWeChat(ex.Encrypt, encodingAESKey, appID, corpID)
             if err != nil {
-                w.WriteHeader(http.StatusBadRequest)
-                _, _ = w.Write([]byte("decrypt failed"))
+                fmt.Println("decrypt error xml:", err)
+                w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+                w.WriteHeader(http.StatusOK)
+                _, _ = w.Write([]byte("success"))
                 return
             }
             // Async process and ack
