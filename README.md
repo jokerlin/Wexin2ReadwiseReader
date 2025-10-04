@@ -1,6 +1,6 @@
 # Weixin2ReadwiseReader
 
-将企业微信开放客服（WeCom Open KF）的回调消息整理后同步到 Readwise Reader 的 Vercel Go Serverless 项目。该版本在原型的基础上重构了整体架构，强化了安全性、可测试性与可维护性，并补充了完整文档。
+将企业微信开放客服（WeCom Open KF）的回调消息整理后同步到 Readwise Reader 的 Vercel Go Serverless 项目。
 
 ## 功能亮点
 - ✅ 支持企业微信客服回调（明文 & 加密），自动完成签名校验与 AES 解密
