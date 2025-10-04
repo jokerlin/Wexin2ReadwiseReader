@@ -212,12 +212,27 @@ func syncKfMessages(corpID, token, openKfId string) {
 		return
 	}
 
+	// Get cursor from KV
+	cursor, err := getCursorFromKV(openKfId)
+	if err != nil {
+		fmt.Println("Error getting cursor from KV:", err)
+		// Continue without cursor
+	} else if cursor != "" {
+		fmt.Println("Retrieved cursor from KV:", cursor)
+	}
+
 	// Call sync_msg API
 	endpoint := "https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=" + accessToken
 	reqBody := map[string]interface{}{
-		"token":     token,
-		"limit":     1000,
-		"open_kfid": openKfId,
+		"token":        token,
+		"limit":        1000,
+		"voice_format": 0,
+		"open_kfid":    openKfId,
+	}
+
+	// Add cursor if available
+	if cursor != "" {
+		reqBody["cursor"] = cursor
 	}
 
 	reqJSON, _ := json.Marshal(reqBody)
@@ -233,6 +248,25 @@ func syncKfMessages(corpID, token, openKfId string) {
 
 	respBody, _ := io.ReadAll(resp.Body)
 	fmt.Println("Messages:", string(respBody))
+
+	// Parse response to get next_cursor
+	var syncResp struct {
+		ErrCode    int    `json:"errcode"`
+		ErrMsg     string `json:"errmsg"`
+		NextCursor string `json:"next_cursor"`
+		HasMore    int    `json:"has_more"`
+	}
+	if err := json.Unmarshal(respBody, &syncResp); err != nil {
+		fmt.Println("Error parsing sync_msg response:", err)
+		return
+	}
+
+	// Save next_cursor to KV if available
+	if syncResp.ErrCode == 0 && syncResp.NextCursor != "" {
+		if err := saveCursorToKV(openKfId, syncResp.NextCursor); err != nil {
+			fmt.Println("Error saving cursor to KV:", err)
+		}
+	}
 }
 
 // logAccessTokenAsync fetches the enterprise WeCom access_token and prints it.
@@ -285,4 +319,86 @@ func getWeComAccessToken(corpid, secret string) (string, int, error) {
 		return "", 0, fmt.Errorf("errcode=%d errmsg=%s", data.ErrCode, data.ErrMsg)
 	}
 	return data.AccessToken, data.ExpiresIn, nil
+}
+
+// getCursorFromKV retrieves cursor from Vercel KV (Upstash Redis)
+func getCursorFromKV(openKfId string) (string, error) {
+	kvURL := os.Getenv("KV_REST_API_URL")
+	kvToken := os.Getenv("KV_REST_API_TOKEN")
+	if kvURL == "" || kvToken == "" {
+		return "", nil // No KV configured, start from beginning
+	}
+
+	key := "wechat_kf_cursor:" + openKfId
+	endpoint := fmt.Sprintf("%s/get/%s", kvURL, url.PathEscape(key))
+
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+kvToken)
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+
+	if data.Error != "" {
+		return "", fmt.Errorf("KV error: %s", data.Error)
+	}
+
+	return data.Result, nil
+}
+
+// saveCursorToKV saves cursor to Vercel KV (Upstash Redis)
+func saveCursorToKV(openKfId, cursor string) error {
+	kvURL := os.Getenv("KV_REST_API_URL")
+	kvToken := os.Getenv("KV_REST_API_TOKEN")
+	if kvURL == "" || kvToken == "" {
+		return nil // No KV configured, skip saving
+	}
+
+	key := "wechat_kf_cursor:" + openKfId
+	endpoint := fmt.Sprintf("%s/set/%s/%s",
+		kvURL,
+		url.PathEscape(key),
+		url.PathEscape(cursor))
+
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+kvToken)
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return err
+	}
+
+	if data.Error != "" {
+		return fmt.Errorf("KV error: %s", data.Error)
+	}
+
+	fmt.Println("Saved cursor to KV:", cursor)
+	return nil
 }
