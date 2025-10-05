@@ -60,9 +60,9 @@ vercel --prod     # Production environment
 
 - `WECHAT_TOKEN` - WeChat callback token for signature verification
 - `WECHAT_ENCODING_AES_KEY` - 43-character AES key for decryption
-- `WECHAT_CORPID` / `WECHAT_CORP_ID` / `WECHAT_APPID` - Enterprise ID for verification
-- `WECHAT_KF_SECRET` / `WECHAT_CORPSECRET` - Customer service secret for access tokens
-- `READWISE_TOKEN` / `READWISE_API_TOKEN` - Readwise Reader API token
+- `WECHAT_CORPID` - Enterprise ID for verification
+- `WECHAT_KF_SECRET` - Customer service secret for access tokens
+- `READWISE_TOKEN` - Readwise Reader API token
 - `KV_REST_API_URL` - Vercel KV REST endpoint
 - `KV_REST_API_TOKEN` - Vercel KV REST token
 

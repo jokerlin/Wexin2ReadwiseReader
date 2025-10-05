@@ -31,9 +31,9 @@ internal/
 | ---- | -------- | ---- |
 | `WECHAT_TOKEN` | ✅ | 企业微信客服回调配置的 Token，用于签名校验 |
 | `WECHAT_ENCODING_AES_KEY` | ✅ | 43 字符的 EncodingAESKey，用于 AES-256-CBC 解密 |
-| `WECHAT_CORPID` / `WECHAT_CORP_ID` / `WECHAT_APPID` | ✅ | 企业 ID / AppID，用于解密后尾部校验 |
-| `WECHAT_KF_SECRET` / `WECHAT_CORPSECRET` | ✅) | 开放客服 Secret，用于换取 access_token |
-| `READWISE_TOKEN` / `READWISE_API_TOKEN` | ✅ | Readwise Reader API Token，用于保存链接 |
+| `WECHAT_CORPID` | ✅ | 企业 ID，用于解密后尾部校验 |
+| `WECHAT_KF_SECRET` | ✅ | 开放客服 Secret，用于换取 access_token |
+| `READWISE_TOKEN` | ✅ | Readwise Reader API Token，用于保存链接 |
 | `KV_REST_API_URL` | ✅ | Vercel KV REST Endpoint（例如 `https://xxx.upstash.io`） |
 | `KV_REST_API_TOKEN` | ✅ | Vercel KV REST Token |
 | `HTTP_TIMEOUT` | 可选 | 对外 HTTP 请求超时时间（默认 `5s`） |

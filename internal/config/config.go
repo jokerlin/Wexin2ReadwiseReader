@@ -37,9 +37,9 @@ func FromEnv() (Config, error) {
         cfg := Config{
             WechatToken:          strings.TrimSpace(os.Getenv("WECHAT_TOKEN")),
             WechatEncodingAESKey: strings.TrimSpace(os.Getenv("WECHAT_ENCODING_AES_KEY")),
-            WechatCorpID:         firstNonEmpty(os.Getenv("WECHAT_CORPID"), os.Getenv("WECHAT_CORP_ID"), os.Getenv("WECHAT_APPID")),
-            WechatKFSecret:       firstNonEmpty(os.Getenv("WECHAT_KF_SECRET"), os.Getenv("WECHAT_CORPSECRET")),
-            ReadwiseToken:        firstNonEmpty(os.Getenv("READWISE_TOKEN"), os.Getenv("READWISE_API_TOKEN")),
+            WechatCorpID:         strings.TrimSpace(os.Getenv("WECHAT_CORPID")),
+            WechatKFSecret:       strings.TrimSpace(os.Getenv("WECHAT_KF_SECRET")),
+            ReadwiseToken:        strings.TrimSpace(os.Getenv("READWISE_TOKEN")),
             KVRestAPIURL:         strings.TrimSpace(os.Getenv("KV_REST_API_URL")),
             KVRestAPIToken:       strings.TrimSpace(os.Getenv("KV_REST_API_TOKEN")),
             HTTPClientTimeout:    parseDurationOrDefault(os.Getenv("HTTP_TIMEOUT"), 5*time.Second),
@@ -54,15 +54,6 @@ func FromEnv() (Config, error) {
     })
 
     return loaded, loadErr
-}
-
-func firstNonEmpty(values ...string) string {
-    for _, v := range values {
-        if trimmed := strings.TrimSpace(v); trimmed != "" {
-            return trimmed
-        }
-    }
-    return ""
 }
 
 func parseDurationOrDefault(raw string, fallback time.Duration) time.Duration {
