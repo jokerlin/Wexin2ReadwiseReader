@@ -1,6 +1,13 @@
 # Weixin2ReadwiseReader
 
-将企业微信开放客服（WeCom Open KF）的回调消息整理后同步到 Readwise Reader 的 Vercel Go Serverless 项目。
+转发微信消息到企业微信客服，通过 webhook 回调将文章添加到到 Readwise Reader。
+
+## 一键部署
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fjokerlin%2FWexin2ReadwiseReader&env=WECHAT_TOKEN,WECHAT_ENCODING_AES_KEY,WECHAT_CORPID,WECHAT_KF_SECRET,READWISE_TOKEN,KV_REST_API_URL,KV_REST_API_TOKEN&stores=%5B%7B%22integrationSlug%22%3A%22upstash%22%2C%22productSlug%22%3A%22upstash-kv%22%2C%22type%22%3A%22integration%22%7D%5D
+)
+
+## 教程
+施工中🚧
 
 ## 功能亮点
 - ✅ 支持企业微信客服回调（明文 & 加密），自动完成签名校验与 AES 解密
@@ -81,4 +88,4 @@ vercel --prod     # 生产环境
 - 未保存游标：检查 KV URL/Token 是否配置；若无需增量同步可留空。
 
 ## 许可证
-项目继续沿用原仓库的 [MIT License](LICENSE)。
+[MIT License](LICENSE)。
