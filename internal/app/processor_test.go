@@ -426,3 +426,157 @@ func TestProcessDecryptedPayloadIgnoresLockReleaseFailure(t *testing.T) {
 		t.Fatalf("ProcessDecryptedPayload() error = %v", err)
 	}
 }
+
+func TestProcessDecryptedPayloadSkipsCompletedMessageAndAdvancesCursor(t *testing.T) {
+	wechatClient := &fakeWechatService{
+		responses: []wechat.SyncResponse{linkResponse("msg-1", "https://example.com/article", "cursor-1")},
+	}
+	kvClient := newFakeKVStore()
+	kvClient.values["wechat_kf_processed:wk-1:msg-1"] = "1"
+	readwiseClient := &fakeReadwiseService{}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err != nil {
+		t.Fatalf("ProcessDecryptedPayload() error = %v", err)
+	}
+	if got := len(readwiseClient.urls); got != 0 {
+		t.Fatalf("Readwise saves = %d, want 0", got)
+	}
+	if got, want := kvClient.values["wechat_kf_cursor:wk-1"], "cursor-1"; got != want {
+		t.Fatalf("cursor = %q, want %q", got, want)
+	}
+}
+
+func TestProcessDecryptedPayloadRetriesCursorWithoutResaving(t *testing.T) {
+	response := linkResponse("msg-1", "https://example.com/article", "cursor-1")
+	wechatClient := &fakeWechatService{responses: []wechat.SyncResponse{response, response}}
+	kvClient := newFakeKVStore()
+	kvClient.setFailuresFor["wechat_kf_cursor:wk-1"] = 1
+	readwiseClient := &fakeReadwiseService{}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err == nil {
+		t.Fatal("first call error = nil, want cursor persistence error")
+	}
+	if got, want := kvClient.values["wechat_kf_processed:wk-1:msg-1"], "1"; got != want {
+		t.Fatalf("processed marker after cursor failure = %q, want %q", got, want)
+	}
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err != nil {
+		t.Fatalf("second call error = %v", err)
+	}
+
+	if got, want := len(readwiseClient.urls), 1; got != want {
+		t.Fatalf("Readwise saves = %d, want %d", got, want)
+	}
+	if got, want := kvClient.values["wechat_kf_cursor:wk-1"], "cursor-1"; got != want {
+		t.Fatalf("cursor = %q, want %q", got, want)
+	}
+	if got, want := kvClient.ttls["wechat_kf_processed:wk-1:msg-1"], 7*24*time.Hour; got != want {
+		t.Fatalf("processed marker TTL = %s, want %s", got, want)
+	}
+}
+
+func TestProcessDecryptedPayloadAllowsSameURLForDifferentMessageIDs(t *testing.T) {
+	wechatClient := &fakeWechatService{responses: []wechat.SyncResponse{
+		linkResponse("msg-1", "https://example.com/article", "cursor-1"),
+		linkResponse("msg-2", "https://example.com/article", "cursor-2"),
+	}}
+	kvClient := newFakeKVStore()
+	readwiseClient := &fakeReadwiseService{}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	for i := 0; i < 2; i++ {
+		if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err != nil {
+			t.Fatalf("call %d error = %v", i+1, err)
+		}
+	}
+	if got, want := len(readwiseClient.urls), 2; got != want {
+		t.Fatalf("Readwise saves = %d, want %d", got, want)
+	}
+}
+
+func TestProcessDecryptedPayloadReturnsReadwiseFailureWithoutMutatingState(t *testing.T) {
+	wechatClient := &fakeWechatService{
+		responses: []wechat.SyncResponse{linkResponse("msg-1", "https://example.com/article", "cursor-1")},
+	}
+	kvClient := newFakeKVStore()
+	readwiseClient := &fakeReadwiseService{err: errors.New("save failed")}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err == nil {
+		t.Fatal("ProcessDecryptedPayload() error = nil, want non-nil")
+	}
+	if got := kvClient.values["wechat_kf_processed:wk-1:msg-1"]; got != "" {
+		t.Fatalf("processed marker = %q, want empty", got)
+	}
+	if got := kvClient.values["wechat_kf_cursor:wk-1"]; got != "" {
+		t.Fatalf("cursor = %q, want empty", got)
+	}
+}
+
+func TestProcessDecryptedPayloadReturnsProcessedMarkerReadFailureBeforeMutatingState(t *testing.T) {
+	wechatClient := &fakeWechatService{
+		responses: []wechat.SyncResponse{linkResponse("msg-1", "https://example.com/article", "cursor-1")},
+	}
+	kvClient := newFakeKVStore()
+	kvClient.getErrFor["wechat_kf_processed:wk-1:msg-1"] = errors.New("get failed")
+	readwiseClient := &fakeReadwiseService{}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err == nil {
+		t.Fatal("ProcessDecryptedPayload() error = nil, want non-nil")
+	}
+	if got := len(readwiseClient.urls); got != 0 {
+		t.Fatalf("Readwise saves = %d, want 0", got)
+	}
+	if got := kvClient.values["wechat_kf_cursor:wk-1"]; got != "" {
+		t.Fatalf("cursor = %q, want empty", got)
+	}
+}
+
+func TestProcessDecryptedPayloadReturnsProcessedMarkerWriteFailureWithoutCursorAdvance(t *testing.T) {
+	wechatClient := &fakeWechatService{
+		responses: []wechat.SyncResponse{linkResponse("msg-1", "https://example.com/article", "cursor-1")},
+	}
+	kvClient := newFakeKVStore()
+	kvClient.setTTLFailure = errors.New("set ttl failed")
+	readwiseClient := &fakeReadwiseService{}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err == nil {
+		t.Fatal("ProcessDecryptedPayload() error = nil, want non-nil")
+	}
+	if got, want := len(readwiseClient.urls), 1; got != want {
+		t.Fatalf("Readwise saves = %d, want %d", got, want)
+	}
+	if got := kvClient.values["wechat_kf_processed:wk-1:msg-1"]; got != "" {
+		t.Fatalf("processed marker = %q, want empty", got)
+	}
+	if got := kvClient.values["wechat_kf_cursor:wk-1"]; got != "" {
+		t.Fatalf("cursor = %q, want empty", got)
+	}
+}
+
+func TestProcessDecryptedPayloadRejectsLinkWithoutMessageIDBeforeMutatingState(t *testing.T) {
+	wechatClient := &fakeWechatService{
+		responses: []wechat.SyncResponse{linkResponse("", "https://example.com/article", "cursor-1")},
+	}
+	kvClient := newFakeKVStore()
+	readwiseClient := &fakeReadwiseService{}
+	processor := testProcessor(wechatClient, kvClient, readwiseClient)
+
+	if err := processor.ProcessDecryptedPayload(context.Background(), testPayload); err == nil {
+		t.Fatal("ProcessDecryptedPayload() error = nil, want non-nil")
+	}
+	if got := len(readwiseClient.urls); got != 0 {
+		t.Fatalf("Readwise saves = %d, want 0", got)
+	}
+	if got := kvClient.values["wechat_kf_cursor:wk-1"]; got != "" {
+		t.Fatalf("cursor = %q, want empty", got)
+	}
+	for key := range kvClient.values {
+		if len(key) >= len("wechat_kf_processed:") && key[:len("wechat_kf_processed:")] == "wechat_kf_processed:" {
+			t.Fatalf("processed marker written with missing msgid: %q", key)
+		}
+	}
+}

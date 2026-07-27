@@ -17,7 +17,10 @@ import (
 
 var ErrSyncInProgress = errors.New("wechat kf sync already in progress")
 
-const syncLockTTL = 15 * time.Second
+const (
+	syncLockTTL         = 15 * time.Second
+	processedMessageTTL = 7 * 24 * time.Hour
+)
 
 type wechatService interface {
 	GetAccessToken(context.Context) (wechat.AccessToken, error)
@@ -140,17 +143,31 @@ func (p *Processor) ProcessDecryptedPayload(ctx context.Context, payload []byte)
 	if len(syncResp.MsgList) > 0 {
 		msg := syncResp.MsgList[len(syncResp.MsgList)-1]
 		if msg.MsgType == "link" && msg.Link.URL != "" {
-			if err := p.readwise.SaveURL(ctx, msg.Link.URL, msg.Link.Title); err != nil {
-				p.logger.Printf("WARN readwise save failed url=%s err=%v", msg.Link.URL, err)
+			if msg.MsgID == "" {
+				return errors.New("link message missing msgid")
+			}
+			processedKey := processedKeyForMessage(tokenEnv.OpenKfID, msg.MsgID)
+			processed, err := p.kvClient.Get(ctx, processedKey)
+			if err != nil {
+				return fmt.Errorf("fetch processed marker: %w", err)
+			}
+			if processed != "" {
+				p.logger.Printf("INFO duplicate message skipped msgid=%s", msg.MsgID)
 			} else {
-				p.logger.Printf("INFO readwise save ok url=%s", msg.Link.URL)
+				if err := p.readwise.SaveURL(ctx, msg.Link.URL, msg.Link.Title); err != nil {
+					return fmt.Errorf("save to readwise: %w", err)
+				}
+				if err := p.kvClient.SetWithTTL(ctx, processedKey, "1", processedMessageTTL); err != nil {
+					return fmt.Errorf("persist processed marker: %w", err)
+				}
+				p.logger.Printf("INFO readwise save ok msgid=%s url=%s", msg.MsgID, msg.Link.URL)
 			}
 		}
 	}
 
 	if syncResp.NextCursor != "" {
 		if err := p.kvClient.Set(ctx, cursorKey, syncResp.NextCursor); err != nil {
-			p.logger.Printf("WARN cursor persist failed: %v", err)
+			return fmt.Errorf("persist cursor: %w", err)
 		}
 	}
 
@@ -174,6 +191,10 @@ func kfKeySuffix(openKfID string) string {
 
 func cursorKeyForKf(openKfID string) string {
 	return "wechat_kf_cursor:" + kfKeySuffix(openKfID)
+}
+
+func processedKeyForMessage(openKfID, msgID string) string {
+	return "wechat_kf_processed:" + kfKeySuffix(openKfID) + ":" + msgID
 }
 
 func lockKeyForKf(openKfID string) string {
