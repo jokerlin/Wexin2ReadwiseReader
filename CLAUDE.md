@@ -88,7 +88,7 @@ Optional:
 
 ## Code Style
 
-- Go 1.24.x target
+- Go 1.26.5 target
 - Use `gofmt -w` before committing
 - Package names: lower_snake_case (`wxkfwebhook`)
 - Constructor pattern: `NewProcessor`, `NewClient`
