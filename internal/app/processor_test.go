@@ -27,6 +27,40 @@ type fakeWechatService struct {
 	startOnce sync.Once
 }
 
+type perKfBlockingWechatService struct {
+	firstStarted      chan struct{}
+	firstUnblock      <-chan struct{}
+	secondStarted     chan struct{}
+	firstStartedOnce  sync.Once
+	secondStartedOnce sync.Once
+}
+
+func (f *perKfBlockingWechatService) GetAccessToken(context.Context) (wechat.AccessToken, error) {
+	return wechat.AccessToken{Token: "access-token"}, nil
+}
+
+func (f *perKfBlockingWechatService) SyncMessages(
+	ctx context.Context,
+	_ string,
+	req wechat.SyncRequest,
+) (wechat.SyncResponse, error) {
+	switch req.OpenKfID {
+	case "wk-first":
+		f.firstStartedOnce.Do(func() { close(f.firstStarted) })
+		select {
+		case <-f.firstUnblock:
+			return wechat.SyncResponse{}, nil
+		case <-ctx.Done():
+			return wechat.SyncResponse{}, ctx.Err()
+		}
+	case "wk-second":
+		f.secondStartedOnce.Do(func() { close(f.secondStarted) })
+		return wechat.SyncResponse{}, nil
+	default:
+		return wechat.SyncResponse{}, fmt.Errorf("unexpected OpenKfID %q", req.OpenKfID)
+	}
+}
+
 func (f *fakeWechatService) GetAccessToken(context.Context) (wechat.AccessToken, error) {
 	return wechat.AccessToken{Token: "access-token"}, nil
 }
@@ -317,6 +351,52 @@ func TestProcessDecryptedPayloadSerializesConcurrentCallbacks(t *testing.T) {
 	}
 }
 
+func TestProcessDecryptedPayloadAllowsDifferentOpenKfIDStreamsInParallel(t *testing.T) {
+	firstStarted := make(chan struct{})
+	firstUnblock := make(chan struct{})
+	secondStarted := make(chan struct{})
+	processor := testProcessor(
+		&perKfBlockingWechatService{
+			firstStarted:  firstStarted,
+			firstUnblock:  firstUnblock,
+			secondStarted: secondStarted,
+		},
+		newFakeKVStore(),
+		&fakeReadwiseService{},
+	)
+
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- processor.ProcessDecryptedPayload(
+			context.Background(),
+			[]byte(`<xml><Token>callback-token</Token><OpenKfId>wk-first</OpenKfId></xml>`),
+		)
+	}()
+	waitForStarted(t, firstStarted)
+
+	secondResult := make(chan error, 1)
+	go func() {
+		secondResult <- processor.ProcessDecryptedPayload(
+			context.Background(),
+			[]byte(`<xml><Token>callback-token</Token><OpenKfId>wk-second</OpenKfId></xml>`),
+		)
+	}()
+	waitForStarted(t, secondStarted)
+	if err := waitForProcess(t, secondResult); err != nil {
+		t.Fatalf("second stream error = %v", err)
+	}
+	select {
+	case err := <-firstResult:
+		t.Fatalf("first stream returned before it was unblocked: %v", err)
+	default:
+	}
+
+	close(firstUnblock)
+	if err := waitForProcess(t, firstResult); err != nil {
+		t.Fatalf("first stream error = %v", err)
+	}
+}
+
 func TestProcessDecryptedPayloadUsesDefaultLockKeyForEmptyOpenKfID(t *testing.T) {
 	kvClient := newFakeKVStore()
 	processor := testProcessor(
@@ -379,6 +459,61 @@ func TestProcessDecryptedPayloadRequiresKV(t *testing.T) {
 	}
 	if wechatClient.calls != 0 {
 		t.Fatalf("sync calls = %d, want 0", wechatClient.calls)
+	}
+}
+
+func TestNewProcessorPreservesMissingDependencyGuards(t *testing.T) {
+	baseConfig := config.Config{
+		WechatCorpID:      "corp-id",
+		WechatKFSecret:    "kf-secret",
+		ReadwiseToken:     "readwise-token",
+		KVRestAPIURL:      "://invalid",
+		KVRestAPIToken:    "kv-token",
+		HTTPClientTimeout: time.Second,
+		KVClientTimeout:   time.Second,
+	}
+	tests := []struct {
+		name    string
+		config  config.Config
+		wantErr string
+	}{
+		{
+			name: "missing kv",
+			config: func() config.Config {
+				cfg := baseConfig
+				cfg.KVRestAPIURL = ""
+				cfg.KVRestAPIToken = ""
+				return cfg
+			}(),
+			wantErr: "kv client not configured",
+		},
+		{
+			name: "missing wechat",
+			config: func() config.Config {
+				cfg := baseConfig
+				cfg.WechatCorpID = ""
+				return cfg
+			}(),
+			wantErr: "wechat api client not configured",
+		},
+		{
+			name: "missing readwise",
+			config: func() config.Config {
+				cfg := baseConfig
+				cfg.ReadwiseToken = ""
+				return cfg
+			}(),
+			wantErr: "readwise client not configured",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			processor := NewProcessor(tt.config, log.New(io.Discard, "", 0))
+			err := processor.ProcessDecryptedPayload(context.Background(), testPayload)
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("ProcessDecryptedPayload() error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

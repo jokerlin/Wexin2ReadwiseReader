@@ -54,12 +54,24 @@ func NewProcessor(cfg config.Config, logger *log.Logger) *Processor {
 	if logger == nil {
 		logger = log.Default()
 	}
+	var wechatClient wechatService
+	if client := wechat.NewAPIClient(cfg.WechatCorpID, cfg.WechatKFSecret, cfg.HTTPClientTimeout); client != nil {
+		wechatClient = client
+	}
+	var kvClient kvStore
+	if client := kv.New(cfg.KVRestAPIURL, cfg.KVRestAPIToken, cfg.KVClientTimeout); client != nil {
+		kvClient = client
+	}
+	var readwiseClient readwiseService
+	if client := readwise.NewClient(cfg.ReadwiseToken, cfg.HTTPClientTimeout); client != nil {
+		readwiseClient = client
+	}
 
 	return &Processor{
 		cfg:          cfg,
-		wechatClient: wechat.NewAPIClient(cfg.WechatCorpID, cfg.WechatKFSecret, cfg.HTTPClientTimeout),
-		kvClient:     kv.New(cfg.KVRestAPIURL, cfg.KVRestAPIToken, cfg.KVClientTimeout),
-		readwise:     readwise.NewClient(cfg.ReadwiseToken, cfg.HTTPClientTimeout),
+		wechatClient: wechatClient,
+		kvClient:     kvClient,
+		readwise:     readwiseClient,
 		logger:       logger,
 		newLockOwner: randomLockOwner,
 	}
