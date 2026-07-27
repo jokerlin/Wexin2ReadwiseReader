@@ -317,6 +317,26 @@ func TestProcessDecryptedPayloadSerializesConcurrentCallbacks(t *testing.T) {
 	}
 }
 
+func TestProcessDecryptedPayloadUsesDefaultLockKeyForEmptyOpenKfID(t *testing.T) {
+	kvClient := newFakeKVStore()
+	processor := testProcessor(
+		&fakeWechatService{responses: []wechat.SyncResponse{{}}},
+		kvClient,
+		&fakeReadwiseService{},
+	)
+
+	payload := []byte(`<xml><Token>callback-token</Token><OpenKfId></OpenKfId></xml>`)
+	if err := processor.ProcessDecryptedPayload(context.Background(), payload); err != nil {
+		t.Fatalf("ProcessDecryptedPayload() error = %v", err)
+	}
+
+	kvClient.mu.Lock()
+	defer kvClient.mu.Unlock()
+	if got, want := kvClient.acquireKey, "wechat_kf_sync_lock:default"; got != want {
+		t.Fatalf("lock key = %q, want %q", got, want)
+	}
+}
+
 func TestProcessDecryptedPayloadReleasesLockWithCancellationIndependentContext(t *testing.T) {
 	started := make(chan struct{})
 	wechatClient := &fakeWechatService{
