@@ -12,7 +12,7 @@
 ## 功能亮点
 - ✅ 支持企业微信客服回调（明文 & 加密），自动完成签名校验与 AES 解密
 - ✅ 将回调中的 Token 与 OpenKfId 自动用于拉取会话消息，并将链接型消息保存至 Readwise Reader
-- ✅ 使用 Upstash KV（Vercel KV）保存同步游标，避免重复处理
+- ✅ 使用 Upstash KV（Vercel KV）保存同步游标、分布式锁和保留七天的 `msgid` 已处理标记，避免重复处理
 - ✅ 完整的错误处理与 key=value 日志输出，便于排查线上问题
 - ✅ 内部模块化设计，新增针对加解密与签名逻辑的单元测试
 
@@ -46,7 +46,7 @@ internal/
 | `HTTP_TIMEOUT` | 可选 | 对外 HTTP 请求超时时间（默认 `5s`） |
 | `KV_HTTP_TIMEOUT` | 可选 | KV 请求超时时间（默认 `3s`） |
 
-> **提示**：若缺少 KV 配置，系统仍可运行但不会保存游标；缺少 Readwise Token 时将无法推送链接，会返回错误以触发重试。
+> **提示**：KV 是安全处理的必需依赖。若缺少 KV 配置，Webhook 会失败关闭并返回错误，以防止重复写入 Readwise；缺少 Readwise Token 时同样会返回错误以触发重试。
 
 ## 本地运行
 1. 安装并登录 Vercel CLI
@@ -84,8 +84,8 @@ vercel --prod     # 生产环境
 
 ## 故障排查
 - Webhook 返回 401：核对 `WECHAT_TOKEN`、timestamp/nonce 是否按原样传入。
-- Webhook 返回 500：通常表示 AES Key 或 Readwise/WeChat 凭证缺失，详见 Vercel 日志中的结构化错误信息。
-- 未保存游标：检查 KV URL/Token 是否配置；若无需增量同步可留空。
+- Webhook 返回 500：通常表示 AES Key、KV、Readwise 或 WeChat 调用失败；短暂的 500 也可能表示另一条回调正持有该客服的同步锁，此时企业微信应重试。详见 Vercel 日志中的结构化错误信息。
+- 未保存游标：检查 KV URL/Token 是否配置。KV 不可留空，因为它同时负责游标、同步锁和消息去重标记。
 
 ## 许可证
 [MIT License](LICENSE)。
