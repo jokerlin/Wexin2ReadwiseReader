@@ -12,7 +12,7 @@
 - `go test ./internal/wechat -run TestDecrypt` helps when iterating on crypto utilities.
 
 ## Coding Style & Naming Conventions
-- Target Go `1.24.x`. Use `gofmt -w` before committing; prefer organizing imports via `goimports` if available.
+- Target Go `1.26.5`. Use `gofmt -w` before committing; prefer organizing imports via `goimports` if available.
 - Package names remain lower_snake (`wxkfwebhook`), files use lowercase with underscores only when improving clarity.
 - Favor constructor-style helpers (e.g., `NewProcessor`, `NewClient`) and return early on error, matching existing patterns.
 
