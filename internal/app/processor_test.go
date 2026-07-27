@@ -32,9 +32,9 @@ func (f *fakeWechatService) GetAccessToken(context.Context) (wechat.AccessToken,
 }
 
 func (f *fakeWechatService) SyncMessages(
-	context.Context,
-	string,
-	wechat.SyncRequest,
+	ctx context.Context,
+	_ string,
+	_ wechat.SyncRequest,
 ) (wechat.SyncResponse, error) {
 	f.mu.Lock()
 	f.calls++
@@ -43,7 +43,11 @@ func (f *fakeWechatService) SyncMessages(
 		f.startOnce.Do(func() { close(f.started) })
 	}
 	if f.unblock != nil {
-		<-f.unblock
+		select {
+		case <-f.unblock:
+		case <-ctx.Done():
+			return wechat.SyncResponse{}, ctx.Err()
+		}
 	}
 	if f.syncErr != nil {
 		return wechat.SyncResponse{}, f.syncErr
@@ -70,6 +74,15 @@ type fakeKVStore struct {
 	setTTLFailure  error
 	acquireErr     error
 	releaseErr     error
+	setCalls       int
+	acquireCalls   int
+	acquireKey     string
+	acquireOwner   string
+	acquireTTL     time.Duration
+	releaseCalls   int
+	releaseKey     string
+	releaseOwner   string
+	releaseCtxErr  error
 }
 
 func newFakeKVStore() *fakeKVStore {
@@ -94,6 +107,7 @@ func (f *fakeKVStore) Get(_ context.Context, key string) (string, error) {
 func (f *fakeKVStore) Set(_ context.Context, key, value string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.setCalls++
 	if f.setFailuresFor[key] > 0 {
 		f.setFailuresFor[key]--
 		return errors.New("set failed")
@@ -113,9 +127,13 @@ func (f *fakeKVStore) SetWithTTL(_ context.Context, key, value string, ttl time.
 	return nil
 }
 
-func (f *fakeKVStore) AcquireLock(_ context.Context, key, owner string, _ time.Duration) (bool, error) {
+func (f *fakeKVStore) AcquireLock(_ context.Context, key, owner string, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.acquireCalls++
+	f.acquireKey = key
+	f.acquireOwner = owner
+	f.acquireTTL = ttl
 	if f.acquireErr != nil {
 		return false, f.acquireErr
 	}
@@ -126,9 +144,13 @@ func (f *fakeKVStore) AcquireLock(_ context.Context, key, owner string, _ time.D
 	return true, nil
 }
 
-func (f *fakeKVStore) ReleaseLock(_ context.Context, key, owner string) error {
+func (f *fakeKVStore) ReleaseLock(ctx context.Context, key, owner string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.releaseCalls++
+	f.releaseKey = key
+	f.releaseOwner = owner
+	f.releaseCtxErr = ctx.Err()
 	if f.releaseErr != nil {
 		return f.releaseErr
 	}
@@ -186,6 +208,26 @@ func linkResponse(msgID, pageURL, nextCursor string) wechat.SyncResponse {
 	}
 }
 
+func waitForStarted(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sync did not start")
+	}
+}
+
+func waitForProcess(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("ProcessDecryptedPayload did not return")
+		return nil
+	}
+}
+
 func TestProcessDecryptedPayloadSerializesConcurrentCallbacks(t *testing.T) {
 	started := make(chan struct{})
 	unblock := make(chan struct{})
@@ -202,14 +244,42 @@ func TestProcessDecryptedPayloadSerializesConcurrentCallbacks(t *testing.T) {
 	go func() {
 		firstErr <- processor.ProcessDecryptedPayload(context.Background(), testPayload)
 	}()
-	<-started
+	waitForStarted(t, started)
+
+	kvClient.mu.Lock()
+	firstOwner := kvClient.acquireOwner
+	if got, want := kvClient.acquireKey, "wechat_kf_sync_lock:wk-1"; got != want {
+		kvClient.mu.Unlock()
+		t.Fatalf("lock key = %q, want %q", got, want)
+	}
+	if got, want := kvClient.acquireTTL, 15*time.Second; got != want {
+		kvClient.mu.Unlock()
+		t.Fatalf("lock TTL = %v, want %v", got, want)
+	}
+	kvClient.mu.Unlock()
 
 	secondErr := processor.ProcessDecryptedPayload(context.Background(), testPayload)
 	if !errors.Is(secondErr, ErrSyncInProgress) {
 		t.Fatalf("second call error = %v, want ErrSyncInProgress", secondErr)
 	}
+	wechatClient.mu.Lock()
+	if got, want := wechatClient.calls, 1; got != want {
+		wechatClient.mu.Unlock()
+		t.Fatalf("sync calls while lock is busy = %d, want %d", got, want)
+	}
+	wechatClient.mu.Unlock()
+	kvClient.mu.Lock()
+	if got, want := kvClient.setCalls, 0; got != want {
+		kvClient.mu.Unlock()
+		t.Fatalf("cursor writes while lock is busy = %d, want %d", got, want)
+	}
+	if got := kvClient.values["wechat_kf_cursor:wk-1"]; got != "" {
+		kvClient.mu.Unlock()
+		t.Fatalf("cursor while lock is busy = %q, want empty", got)
+	}
+	kvClient.mu.Unlock()
 	close(unblock)
-	if err := <-firstErr; err != nil {
+	if err := waitForProcess(t, firstErr); err != nil {
 		t.Fatalf("first call error = %v", err)
 	}
 
@@ -217,6 +287,64 @@ func TestProcessDecryptedPayloadSerializesConcurrentCallbacks(t *testing.T) {
 	defer readwiseClient.mu.Unlock()
 	if got, want := len(readwiseClient.urls), 1; got != want {
 		t.Fatalf("Readwise saves = %d, want %d", got, want)
+	}
+
+	kvClient.mu.Lock()
+	if got, want := kvClient.releaseCalls, 1; got != want {
+		kvClient.mu.Unlock()
+		t.Fatalf("lock release calls = %d, want %d", got, want)
+	}
+	if got, want := kvClient.releaseKey, "wechat_kf_sync_lock:wk-1"; got != want {
+		kvClient.mu.Unlock()
+		t.Fatalf("released lock key = %q, want %q", got, want)
+	}
+	if got, want := kvClient.releaseOwner, firstOwner; got != want {
+		kvClient.mu.Unlock()
+		t.Fatalf("released lock owner = %q, want %q", got, want)
+	}
+	if got := kvClient.releaseCtxErr; got != nil {
+		kvClient.mu.Unlock()
+		t.Fatalf("release context error = %v, want nil", got)
+	}
+	kvClient.mu.Unlock()
+
+	reacquired, err := kvClient.AcquireLock(context.Background(), "wechat_kf_sync_lock:wk-1", "next-owner", 15*time.Second)
+	if err != nil {
+		t.Fatalf("reacquire released lock: %v", err)
+	}
+	if !reacquired {
+		t.Fatal("reacquire released lock = false, want true")
+	}
+}
+
+func TestProcessDecryptedPayloadReleasesLockWithCancellationIndependentContext(t *testing.T) {
+	started := make(chan struct{})
+	wechatClient := &fakeWechatService{
+		started: started,
+		unblock: make(chan struct{}),
+	}
+	kvClient := newFakeKVStore()
+	processor := testProcessor(wechatClient, kvClient, &fakeReadwiseService{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- processor.ProcessDecryptedPayload(ctx, testPayload)
+	}()
+	waitForStarted(t, started)
+	cancel()
+
+	if err := waitForProcess(t, result); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProcessDecryptedPayload() error = %v, want context.Canceled", err)
+	}
+	kvClient.mu.Lock()
+	defer kvClient.mu.Unlock()
+	if got, want := kvClient.releaseCalls, 1; got != want {
+		t.Fatalf("lock release calls = %d, want %d", got, want)
+	}
+	if got := kvClient.releaseCtxErr; got != nil {
+		t.Fatalf("release context error = %v, want nil", got)
 	}
 }
 
