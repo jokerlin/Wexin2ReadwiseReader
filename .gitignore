@@ -68,3 +68,6 @@ server.log
 
 # vscode
 .vscode/*
+
+# Local git worktrees
+.worktrees/
